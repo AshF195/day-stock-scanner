@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import concurrent.futures
 import requests
+import time # <--- NEW: Add this to the top of your file
 
 # Mobile-friendly layout
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
@@ -93,15 +94,16 @@ def get_tickers(market):
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
+    
+    # Add a tiny pause so Yahoo doesn't think we are a DDoS bot
+    time.sleep(0.5) 
+    
     try:
-        # FIX: Removed session=yf_session so yfinance can generate its own cookies!
         stock = yf.Ticker(ticker)
-        
         df_daily = stock.history(period="1mo")
         
-        # FIX: Force an error if Yahoo silently blocks the download
         if df_daily.empty: 
-            raise Exception("Yahoo Finance returned empty data (Blocked or Rate Limited)")
+            raise Exception("Yahoo returned empty data")
             
         if len(df_daily) < 15: return None
             
@@ -144,22 +146,27 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         
         if score < 3 and not is_tracking: return None
 
-        # Deep Analytics for Float & Short
-        info = stock.info or {} 
-        float_shares = info.get('floatShares', 0)
-        short_pct = info.get('shortPercentOfFloat', 0)
-        
+        # --- PHASE 3: Deep Analytics (Now wrapped in safety for UK stocks) ---
         float_display = "N/A"
-        if float_shares and float_shares > 0:
-            float_display = f"{float_shares / 1000000:.1f}M"
-            if float_shares < 60000000: score += int((60 - (float_shares / 1000000)) / 5) + 1
-            
         short_display = "N/A"
-        if short_pct and short_pct > 0:
-            short_val = short_pct * 100
-            short_display = f"{short_val:.1f}%"
-            if short_val >= 5.0: score += int(short_val / 5)
+        
+        try:
+            info = stock.info or {} 
+            float_shares = info.get('floatShares', 0)
+            short_pct = info.get('shortPercentOfFloat', 0)
+            
+            if float_shares and float_shares > 0:
+                float_display = f"{float_shares / 1000000:.1f}M"
+                if float_shares < 60000000: score += int((60 - (float_shares / 1000000)) / 5) + 1
+                
+            if short_pct and short_pct > 0:
+                short_val = short_pct * 100
+                short_display = f"{short_val:.1f}%"
+                if short_val >= 5.0: score += int(short_val / 5)
+        except Exception:
+            pass # If Yahoo crashes on the info scrape, just ignore it and keep the stock!
 
+        # --- TIERING ---
         if score >= 15: tier = "🔥 S-Tier"
         elif score >= 10: tier = "⭐ A-Tier"
         elif score >= 5: tier = "👍 B-Tier"
@@ -185,7 +192,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             "Company": company_name
         }
     except Exception as e:
-        # Force the error up to the UI so we can see it
         raise Exception(f"API Error - {str(e)}")
 
 # --- UI STYLING FUNCTION ---
@@ -249,7 +255,7 @@ if st.button("🚀 Scan Market", use_container_width=True):
         results = []
         errors = [] # <-- NEW: List to catch errors
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 progress_bar.progress((i + 1) / len(ticker_list))
