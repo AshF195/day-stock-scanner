@@ -10,8 +10,9 @@ import time
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
 
 # --- SESSION STATE INITIALIZATION ---
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
+# Watchlist is now a Dictionary to store BOTH Ticker and Company across different market scans
+if "watchlist" not in st.session_state or isinstance(st.session_state.watchlist, list):
+    st.session_state.watchlist = {} 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = pd.DataFrame()
 
@@ -45,7 +46,6 @@ def get_session():
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     })
-    # Inject a consent cookie to bypass Yahoo's EU/UK privacy blocker popups!
     session.cookies.set('CONSENT', 'YES+cb', domain='.yahoo.com')
     return session
 
@@ -65,16 +65,11 @@ def get_live_gainers(market):
         
         if tables:
             df = tables[0]
-            # Drop empty rows to prevent crashes
             df = df.dropna(subset=['Symbol'])
             raw_tickers = df['Symbol'].astype(str).tolist()
-            
-            # Strip out hidden graphical junk Yahoo puts in the symbol column (e.g. "A AXTI" -> "AXTI")
             clean_tickers = [t.split()[-1].upper() for t in raw_tickers if t.strip()]
             names = df['Name'].astype(str).tolist() if 'Name' in df.columns else [""] * len(clean_tickers)
-            
             return list(zip(clean_tickers, names))
-            
     except ValueError:
         st.error("⚠️ Yahoo blocked the scraper (No tables found). Wait 1 minute and try again.")
     except Exception as e:
@@ -116,17 +111,13 @@ def get_static_tickers(market):
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
-    
-    # Pause to prevent API rate limits
     time.sleep(0.5) 
     
     try:
         stock = yf.Ticker(ticker)
         df_daily = stock.history(period="1mo")
         
-        if df_daily.empty: 
-            raise Exception("Yahoo returned empty data")
-            
+        if df_daily.empty: raise Exception("Yahoo returned empty data")
         if len(df_daily) < 15: return None
             
         prev_close = df_daily['Close'].iloc[-2]
@@ -168,7 +159,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         
         if score < 3 and not is_tracking: return None
 
-        # Deep Analytics (Protected for missing UK Data)
         float_display = "N/A"
         short_display = "N/A"
         try:
@@ -214,7 +204,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     except Exception as e:
         raise Exception(f"API Error - {str(e)}")
 
-# --- UI STYLING FUNCTION (RAG Text Formatting) ---
+# --- UI STYLING FUNCTIONS ---
 def color_status(val):
     val_str = str(val)
     if "PEAK" in val_str: return 'color: #FF3333; font-weight: bold'  
@@ -223,120 +213,187 @@ def color_status(val):
     if "Under VWAP" in val_str: return 'color: #CC0000'                     
     return ''
 
-# --- TOP SECTION: LIVE WATCHLIST ---
-if st.session_state.watchlist:
-    st.success("🎯 **Active Watchlist** (Pinned)")
+def color_metrics(val, column):
+    try:
+        if isinstance(val, str):
+            if val == "N/A": return ""
+            num = float(val.replace('M', '').replace('%', '').replace('x', ''))
+        else:
+            num = float(val)
+    except ValueError:
+        return ""
     
-    if st.button("🔄 Refresh Watchlist Prices", type="primary"):
-        with st.spinner("Fetching live data..."):
-            tracked_results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {executor.submit(analyze_day_trading_metrics, (t, "Watchlist"), True): t for t in st.session_state.watchlist}
-                for future in concurrent.futures.as_completed(futures):
+    # RAG Formatting Rules
+    if column == "Score":
+        if num >= 10: return 'color: #33CC33; font-weight: bold'
+        if num < 5: return 'color: #FF3333'
+    elif column in ["Chg %", "Gap %"]:
+        if num >= 5: return 'color: #33CC33; font-weight: bold'
+        if num < 0: return 'color: #FF3333'
+    elif column == "RVOL":
+        if num >= 2.0: return 'color: #33CC33; font-weight: bold'
+        if num < 1.0: return 'color: #FF3333'
+    elif column == "VWAP Dist %":
+        if num > 6.0 or num < 0: return 'color: #FF3333' 
+        if 0 <= num <= 4.0: return 'color: #33CC33' 
+    elif column == "Float":
+        if num < 20: return 'color: #33CC33; font-weight: bold' 
+        if num > 100: return 'color: #FF3333' 
+    elif column == "Short %":
+        if num > 10: return 'color: #33CC33; font-weight: bold' 
+    
+    return ""
+
+def apply_styling(df):
+    return df.style.map(color_status, subset=["Status"]) \
+                   .map(lambda x: color_metrics(x, "Score"), subset=["Score"]) \
+                   .map(lambda x: color_metrics(x, "Chg %"), subset=["Chg %"]) \
+                   .map(lambda x: color_metrics(x, "Gap %"), subset=["Gap %"]) \
+                   .map(lambda x: color_metrics(x, "RVOL"), subset=["RVOL"]) \
+                   .map(lambda x: color_metrics(x, "VWAP Dist %"), subset=["VWAP Dist %"]) \
+                   .map(lambda x: color_metrics(x, "Float"), subset=["Float"]) \
+                   .map(lambda x: color_metrics(x, "Short %"), subset=["Short %"])
+
+# --- TAB LAYOUT ---
+tab_scan, tab_watch = st.tabs(["🚀 Live Scanner", "🎯 My Watchlist"])
+
+# ==========================================
+# TAB 1: MARKET SCANNER
+# ==========================================
+with tab_scan:
+    market_choices = [
+        "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
+        "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual"
+    ]
+    market_choice = st.selectbox("🌍 Select Market to Scan:", market_choices)
+
+    manual_tickers = ""
+    if market_choice == "Manual":
+        manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
+
+    if st.button("🚀 Scan Market", use_container_width=True):
+        if market_choice == "Manual":
+            ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
+        elif "Yahoo Live" in market_choice:
+            ticker_list = get_live_gainers(market_choice) 
+        else:
+            ticker_list = get_static_tickers(market_choice)
+            
+        if ticker_list:
+            st.info(f"Scanning {len(ticker_list)} stocks...")
+            progress_bar = st.progress(0)
+            results = []
+            errors = []
+            
+            # Workers manually set to 4 based on your testing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    progress_bar.progress((i + 1) / len(ticker_list))
                     try:
                         res = future.result()
-                        if res: tracked_results.append(res)
-                    except Exception:
-                        pass
-            
-            if tracked_results:
-                df_tracked = pd.DataFrame(tracked_results).sort_values(by="Score", ascending=False)
-                
-                sell_warnings = df_tracked[df_tracked['Status'].isin(["🚨 PEAK", "⚠️ Cresting"])]['Ticker'].tolist()
-                if sell_warnings:
-                    st.error(f"**⚠️ SELL WARNING:** Momentum is overextended on: **{', '.join(sell_warnings)}**. Consider taking profits!")
-                
-                st.dataframe(
-                    df_tracked.style.map(color_status, subset=["Status"]),
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, dump imminent.\n📉 Under VWAP: Momentum dying."),
-                        "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                        "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-                        "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
-                    }
-                )
-    st.divider()
+                        if res: results.append(res)
+                    except Exception as e:
+                        errors.append(f"{futures[future][0]}: {str(e)}") 
+                        
+            if errors and len(errors) > 5:
+                st.error(f"⚠️ Caught {len(errors)} API timeouts. Yahoo may be rate-limiting.")
+                with st.expander("View Error Logs"):
+                    st.write(errors)
 
-# --- BOTTOM SECTION: MARKET SCANNER ---
-market_choices = [
-    "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
-    "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual"
-]
-market_choice = st.selectbox("🌍 Select Market to Scan:", market_choices)
-
-manual_tickers = ""
-if market_choice == "Manual":
-    manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
-
-if st.button("🚀 Scan Market", use_container_width=True):
-    
-    # Check which scraping method to use
-    if market_choice == "Manual":
-        ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
-    elif "Yahoo Live" in market_choice:
-        ticker_list = get_live_gainers(market_choice) # Bypasses cache entirely
-    else:
-        ticker_list = get_static_tickers(market_choice)
-        
-    if ticker_list:
-        st.info(f"Scanning {len(ticker_list)} stocks...")
-        progress_bar = st.progress(0)
-        results = []
-        errors = []
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                progress_bar.progress((i + 1) / len(ticker_list))
-                try:
-                    res = future.result()
-                    if res: results.append(res)
-                except Exception as e:
-                    errors.append(f"{futures[future][0]}: {str(e)}") 
-                    
-        if errors and len(errors) > 5:
-            st.error(f"⚠️ Caught {len(errors)} API timeouts. Yahoo may be rate-limiting.")
-            with st.expander("View Error Logs"):
-                st.write(errors)
-
-        if results:
-            st.session_state.scan_results = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+            if results:
+                st.session_state.scan_results = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+            else:
+                st.warning("No stocks met the criteria right now.")
+                st.session_state.scan_results = pd.DataFrame()
         else:
-            st.warning("No stocks met the criteria right now.")
-            st.session_state.scan_results = pd.DataFrame()
-    else:
-        # Added explicit warning if the scraper fails to find anything entirely
-        st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
+            st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
 
-# Render the Scan Results Interactive Table
-if not st.session_state.scan_results.empty:
-    st.subheader("🏆 Scanner Results")
-    st.caption("Tick the box on the left to pin a stock to your Live Watchlist at the top.")
-    
-    df_display = st.session_state.scan_results.copy()
-    
-    if 'Track' not in df_display.columns:
-        df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
+    # Render the Scan Results Interactive Table
+    if not st.session_state.scan_results.empty:
+        st.subheader("🏆 Scanner Results")
+        st.caption("Tick the box on the left to pin a stock to your Universal Watchlist.")
+        
+        df_display = st.session_state.scan_results.copy()
+        
+        if 'Track' not in df_display.columns:
+            df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist.keys()))
+        else:
+            df_display["Track"] = df_display["Ticker"].isin(st.session_state.watchlist.keys())
+        
+        edited_df = st.data_editor(
+            apply_styling(df_display),
+            hide_index=True,
+            use_container_width=True,
+            disabled=[col for col in df_display.columns if col not in ["Track"]], 
+            column_config={
+                "Track": st.column_config.CheckboxColumn("📌 Track"),
+                "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought.\n🚨 PEAK: Dump imminent.\n📉 Under VWAP: Momentum dying."),
+                "Price": st.column_config.NumberColumn("Price", format="%.2f"),
+                "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+                "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
+                "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
+                "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%")
+            }
+        )
+        
+        # Save updates to Watchlist dict WITHOUT wiping previous cross-market saves
+        changes_made = False
+        currently_tracked = edited_df[edited_df["Track"] == True]
+        currently_untracked = edited_df[edited_df["Track"] == False]
+
+        for _, row in currently_tracked.iterrows():
+            if row["Ticker"] not in st.session_state.watchlist:
+                st.session_state.watchlist[row["Ticker"]] = row["Company"]
+                changes_made = True
+                
+        for _, row in currently_untracked.iterrows():
+            if row["Ticker"] in st.session_state.watchlist:
+                del st.session_state.watchlist[row["Ticker"]]
+                changes_made = True
+                
+        if changes_made:
+            st.rerun() 
+
+# ==========================================
+# TAB 2: MY WATCHLIST
+# ==========================================
+with tab_watch:
+    if not st.session_state.watchlist:
+        st.info("Your Watchlist is empty. Scan the market and tick the 'Track' box to pin setups here!")
     else:
-        df_display["Track"] = df_display["Ticker"].isin(st.session_state.watchlist)
-    
-    edited_df = st.data_editor(
-        df_display.style.map(color_status, subset=["Status"]),
-        hide_index=True,
-        use_container_width=True,
-        disabled=[col for col in df_display.columns if col not in ["Track"]], 
-        column_config={
-            "Track": st.column_config.CheckboxColumn("📌 Track"),
-            "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, dump imminent.\n📉 Under VWAP: Momentum dying."),
-            "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-            "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
-        }
-    )
-    
-    new_watchlist = edited_df[edited_df["Track"] == True]["Ticker"].tolist()
-    if set(new_watchlist) != set(st.session_state.watchlist):
-        st.session_state.watchlist = new_watchlist
-        st.rerun()
+        st.success(f"🎯 **Active Watchlist** ({len(st.session_state.watchlist)} stocks tracking)")
+        
+        if st.button("🔄 Refresh Watchlist Prices", type="primary"):
+            with st.spinner("Fetching live data for tracked stocks..."):
+                tracked_results = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    # Pass the TRUE company name into the analyzer, not "Watchlist"
+                    futures = {executor.submit(analyze_day_trading_metrics, (ticker, company), True): ticker for ticker, company in st.session_state.watchlist.items()}
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            res = future.result()
+                            if res: tracked_results.append(res)
+                        except Exception:
+                            pass
+                
+                if tracked_results:
+                    df_tracked = pd.DataFrame(tracked_results).sort_values(by="Score", ascending=False)
+                    
+                    sell_warnings = df_tracked[df_tracked['Status'].isin(["🚨 PEAK", "⚠️ Cresting"])]['Ticker'].tolist()
+                    if sell_warnings:
+                        st.error(f"**⚠️ SELL WARNING:** Momentum is overextended on: **{', '.join(sell_warnings)}**. Consider taking profits!")
+                    
+                    st.dataframe(
+                        apply_styling(df_tracked),
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought.\n🚨 PEAK: Dump imminent.\n📉 Under VWAP: Momentum dying."),
+                            "Price": st.column_config.NumberColumn("Price", format="%.2f"),
+                            "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+                            "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
+                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
+                            "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%")
+                        }
+                    )
