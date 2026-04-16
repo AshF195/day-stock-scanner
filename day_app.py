@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import concurrent.futures
+import requests
 
 # Mobile-friendly layout
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
@@ -24,6 +25,18 @@ with st.expander("📖 Scanner Cheat Sheet (How to read this)"):
     * **Float Size:** +1 point for under 60M shares, scaling up +1 point for every 5M shares lower.
     * **Short %:** +1 point for over 5% short interest, scaling up +1 point for every 5% higher.
     """)
+
+# --- WEB SESSION SETUP (To prevent Yahoo rate-limiting) ---
+@st.cache_resource
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    })
+    return session
+
+yf_session = get_session()
 
 # --- 1. INDEX SCRAPER ---
 @st.cache_data(ttl=86400)
@@ -64,15 +77,16 @@ def get_tickers(market):
         pass
     return []
 
-# --- 2. SCORING LOGIC (Debug Version) ---
+# --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info):
     ticker, company_name = ticker_info
     try:
-        stock = yf.Ticker(ticker)
+        # Use our custom Chrome disguise session for Yahoo Finance
+        stock = yf.Ticker(ticker, session=yf_session)
         
         # --- PHASE 1: Basic Technicals ---
         df_daily = stock.history(period="1mo")
-        if len(df_daily) < 15: return {"error": f"{ticker}: Not enough daily data"}
+        if len(df_daily) < 15: return None
             
         prev_close = df_daily['Close'].iloc[-2]
         today_open = df_daily['Open'].iloc[-1]
@@ -86,11 +100,13 @@ def analyze_day_trading_metrics(ticker_info):
         
         df_daily['Daily_Range'] = (df_daily['High'] - df_daily['Low']) / df_daily['Close'].shift(1)
         adr = df_daily['Daily_Range'].iloc[-15:-1].mean() * 100
+        
+        # Kill dead stocks immediately to save time (Must be dead in ALL 3 metrics to drop)
+        if rvol < 1.0 and abs(gap_pct) < 1.0 and adr < 1.5: return None
 
         # --- PHASE 2: Intraday VWAP & RSI ---
         df_intra = stock.history(period="1d", interval="5m")
-        if df_intra.empty or len(df_intra) < 14: 
-            return {"error": f"{ticker}: Not enough 5m intraday data"}
+        if df_intra.empty or len(df_intra) < 14: return None
         
         current_price = df_intra['Close'].iloc[-1]
         day_change = ((current_price - prev_close) / prev_close) * 100
@@ -106,22 +122,23 @@ def analyze_day_trading_metrics(ticker_info):
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
 
-        # Calculate Base Score 
+        # Calculate Base Score (Dynamic Math Scaling)
         score = 0
         score += int(abs(gap_pct))
         if rvol > 0: score += int(rvol / 0.5)
         if adr >= 1.0: score += int(adr)
         
-        # TEMPORARILY LOWERED TO 1 FOR DEBUGGING (Was 3)
-        if score < 1: return None 
+        if score < 3: return None
 
         # --- PHASE 3: Deep Analytics ---
-        info = stock.info
+        # "or {}" protects against Yahoo returning NoneType if connection drops
+        info = stock.info or {} 
+        
         float_shares = info.get('floatShares', 0)
         short_pct = info.get('shortPercentOfFloat', 0)
         
         float_display = "N/A"
-        if float_shares > 0:
+        if float_shares and float_shares > 0:
             float_display = f"{float_shares / 1000000:.1f}M"
             if float_shares < 60000000:
                 float_points = int((60 - (float_shares / 1000000)) / 5) + 1
@@ -160,70 +177,8 @@ def analyze_day_trading_metrics(ticker_info):
             "Company": company_name
         }
     except Exception as e:
-        return {"error": f"{ticker}: API Error - {str(e)}"}
-
-# --- 3. UI & EXECUTION ---
-market_choices = ["Nasdaq 100 (US)", "S&P 500 (US)", "S&P 400 MidCap (US)", "S&P 600 SmallCap (US)", "Dow Jones (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual"]
-market_choice = st.selectbox("🌍 Select Market:", market_choices)
-
-manual_tickers = ""
-if market_choice == "Manual":
-    manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
-
-if st.button("🚀 Scan Market", type="primary", use_container_width=True):
-    ticker_list = [(t.strip().upper(), "Manual Entry") for t in manual_tickers.split(",") if t.strip()] if market_choice == "Manual" else get_tickers(market_choice)
-        
-    if ticker_list:
-        st.info(f"Scanning {len(ticker_list)} stocks...")
-        progress_bar = st.progress(0)
-        
-        results = []
-        errors = []
-        
-        # Lowered max_workers to 5 to prevent Yahoo Finance Rate Limiting
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                progress_bar.progress((i + 1) / len(ticker_list))
-                res = future.result()
-                if res:
-                    if "error" in res:
-                        errors.append(res["error"])
-                    else:
-                        results.append(res)
-                        
-        if errors and len(errors) > 20:
-            st.error(f"⚠️ Yahoo Finance API threw {len(errors)} errors. You might be rate-limited. Wait a few minutes and try again.")
-            with st.expander("View Errors"):
-                st.write(errors)
-                
-        if results:
-            df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
-            
-            st.divider()
-            st.subheader("🏆 Scanner Results")
-            
-            def row_style(row):
-                if "PEAK" in str(row['Status']): return ['background-color: #4a0000; color: white'] * len(row)
-                if "Cresting" in str(row['Status']): return ['background-color: #4a3b00; color: white'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                df.style.apply(row_style, axis=1),
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                    "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-                    "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
-                    "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
-                    "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%"),
-                }
-            )
-        else:
-            st.warning("No stocks met the criteria (Score >= 1). The market may be closed, or it is a very flat trading day.")
-    else:
-        st.error("No tickers found or could not connect to index data.")
+        # Silently fail instead of crashing the whole app
+        return None
 
 # --- 3. UI & EXECUTION ---
 market_choices = [
@@ -240,11 +195,12 @@ if st.button("🚀 Scan Market", type="primary", use_container_width=True):
     ticker_list = [(t.strip().upper(), "Manual Entry") for t in manual_tickers.split(",") if t.strip()] if market_choice == "Manual" else get_tickers(market_choice)
         
     if ticker_list:
-        st.info(f"Scanning {len(ticker_list)} stocks... (Running Dynamic Scoring Engine)")
+        st.info(f"Scanning {len(ticker_list)} stocks...")
         progress_bar = st.progress(0)
         
         results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Restrict max workers to 5 so Yahoo doesn't get overwhelmed
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 progress_bar.progress((i + 1) / len(ticker_list))
