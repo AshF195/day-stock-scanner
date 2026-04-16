@@ -122,7 +122,7 @@ def get_ipo_calendar():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     }
     
-    df = pd.DataFrame()
+    df = pd.DataFrame() # Guarantees we always return a DataFrame, even if empty
     
     # SOURCE 1: Try StockAnalysis (Highly reliable, clean table)
     try:
@@ -164,7 +164,7 @@ def get_ipo_calendar():
                 try:
                     if 'M' in val_str:
                         shares = float(val_str.replace('M', '').strip()) * 1000000
-                    elif val_str == '-' or val_str == 'TBD' or val_str == 'NAN':
+                    elif val_str in ['-', 'TBD', 'NAN', 'N/A']:
                         shares = -1
                     else:
                         shares = float(val_str)
@@ -184,6 +184,8 @@ def get_ipo_calendar():
             # Insert the rating at the very front of the table
             if 'Vol Potential' not in df.columns:
                 df.insert(0, 'Vol Potential', potentials)
+                
+    return df # <--- This is the hero line that stops the app from crashing!
 
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
