@@ -13,14 +13,34 @@ st.markdown("Finds explosive stocks and warns you when they are cresting using V
 # --- 1. INDEX SCRAPER ---
 @st.cache_data(ttl=86400)
 def get_tickers(market):
-    if market == "Nasdaq 100 (US)":
-        return pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]['Ticker'].tolist()
-    elif market == "S&P 500 (US)":
-        return pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]['Symbol'].tolist()
-    elif market == "Dow Jones (US)":
-        return pd.read_html("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")[1]['Symbol'].tolist()
-    elif market == "FTSE 100 (UK)":
-        return [t + ".L" for t in pd.read_html("https://en.wikipedia.org/wiki/FTSE_100_Index")[4]['Ticker'].tolist()]
+    # This header tells Wikipedia we are a normal Chrome browser, stopping the block
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+    
+    try:
+        if market == "Nasdaq 100 (US)":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100", storage_options=headers)
+            # Loop through tables to safely find the one with 'Ticker'
+            for df in tables:
+                if 'Ticker' in df.columns: return df['Ticker'].tolist()
+                
+        elif market == "S&P 500 (US)":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", storage_options=headers)
+            for df in tables:
+                if 'Symbol' in df.columns: return df['Symbol'].tolist()
+                
+        elif market == "Dow Jones (US)":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average", storage_options=headers)
+            for df in tables:
+                if 'Symbol' in df.columns: return df['Symbol'].tolist()
+                
+        elif market == "FTSE 100 (UK)":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/FTSE_100_Index", storage_options=headers)
+            for df in tables:
+                if 'Ticker' in df.columns: return [t + ".L" for t in df['Ticker'].tolist()]
+                
+    except Exception as e:
+        st.error(f"Error scraping Wikipedia: {e}")
+        
     return []
 
 # --- 2. SCORING & CRESTING LOGIC ---
