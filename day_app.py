@@ -6,6 +6,16 @@ import concurrent.futures
 import requests
 import time
 
+# ==========================================
+# 🛠️ YOUR CUSTOM GITHUB LISTS GO HERE 🛠️
+# ==========================================
+# Add as many as you want! Format: "Display Name": "Raw GitHub URL"
+CUSTOM_LISTS = {
+    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ftse_smallcap.txt",
+    # "Another List": "https://raw.githubusercontent.com/...",
+}
+# ==========================================
+
 # --- MOBILE-FRIENDLY LAYOUT ---
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
 
@@ -267,17 +277,17 @@ tab_scan, tab_watch = st.tabs(["🚀 Live Scanner", "🎯 My Watchlist"])
 # TAB 1: MARKET SCANNER
 # ==========================================
 with tab_scan:
-    # Added "Upload Custom List (.txt)" to the market choices
+    # Dynamically combine standard options with your custom GitHub lists
     market_choices = [
         "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
         "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual", "Upload Custom List (.txt)"
-    ]
+    ] + list(CUSTOM_LISTS.keys())
+    
     market_choice = st.selectbox("🌍 Select Market to Scan:", market_choices)
 
     manual_tickers = ""
     uploaded_file = None
     
-    # Show text box or file uploader based on choice
     if market_choice == "Manual":
         manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
     elif market_choice == "Upload Custom List (.txt)":
@@ -286,30 +296,49 @@ with tab_scan:
     if st.button("🚀 Scan Market", use_container_width=True):
         ticker_list = []
         
+        # 1. Manual Entry
         if market_choice == "Manual":
             ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
         
+        # 2. Local File Upload
         elif market_choice == "Upload Custom List (.txt)":
             if uploaded_file is not None:
-                # Read and parse the uploaded file line by line
                 content = uploaded_file.read().decode("utf-8").splitlines()
                 for line in content:
                     line = line.strip()
                     if line:
                         if "," in line:
-                            # Split by the FIRST comma only, in case company names contain commas
                             parts = line.split(",", 1)
-                            ticker = parts[0].strip().upper()
-                            company = parts[1].strip()
-                            ticker_list.append((ticker, company))
+                            ticker_list.append((parts[0].strip().upper(), parts[1].strip()))
                         else:
-                            # Fallback if there is no comma (e.g., just a ticker list)
                             ticker_list.append((line.upper(), "Custom Upload"))
             else:
                 st.warning("⚠️ Please upload a .txt file before scanning.")
                 
+        # 3. Custom GitHub URL List
+        elif market_choice in CUSTOM_LISTS:
+            try:
+                st.info(f"Downloading {market_choice} from GitHub...")
+                resp = requests.get(CUSTOM_LISTS[market_choice], timeout=10)
+                resp.raise_for_status() # Check for 404 errors
+                
+                content = resp.text.splitlines()
+                for line in content:
+                    line = line.strip()
+                    if line:
+                        if "," in line:
+                            parts = line.split(",", 1)
+                            ticker_list.append((parts[0].strip().upper(), parts[1].strip()))
+                        else:
+                            ticker_list.append((line.upper(), "GitHub Upload"))
+            except Exception as e:
+                st.error(f"⚠️ Failed to fetch list from GitHub: {e}")
+                
+        # 4. Yahoo Live Gainers
         elif "Yahoo Live" in market_choice:
             ticker_list = get_live_gainers(market_choice) 
+            
+        # 5. Wikipedia Scraping
         else:
             ticker_list = get_static_tickers(market_choice)
             
@@ -339,7 +368,7 @@ with tab_scan:
             else:
                 st.warning("No stocks met the criteria right now.")
                 st.session_state.scan_results = pd.DataFrame()
-        elif market_choice != "Upload Custom List (.txt)" or uploaded_file is not None:
+        elif market_choice not in ["Upload Custom List (.txt)"] and market_choice not in CUSTOM_LISTS.keys():
             st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
 
     # Render the Scan Results Interactive Table
