@@ -122,45 +122,66 @@ def get_ipo_calendar():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     }
     
+    df = pd.DataFrame()
+    
     # SOURCE 1: Try StockAnalysis (Highly reliable, clean table)
     try:
         url = "https://stockanalysis.com/ipos/calendar/"
         resp = requests.get(url, headers=headers, timeout=10)
-        
         import io
         tables = pd.read_html(io.StringIO(resp.text))
-        
         if tables:
             df = tables[0]
-            # StockAnalysis uses slightly different column names, let's clean them up
             df = df.fillna("TBD")
-            return df
     except Exception:
-        pass # If it fails, move on to the backup source
+        pass 
 
     # SOURCE 2: Backup - Yahoo Finance
-    try:
-        url = "https://finance.yahoo.com/calendar/ipo"
-        resp = yf_session.get(url, timeout=10)
-        
-        import io
-        tables = pd.read_html(io.StringIO(resp.text))
-        
-        if tables:
-            df = tables[0]
-            df = df.fillna("TBD")
-            
-            # Keep only the columns that actually matter
-            useful_cols = [col for col in ['Symbol', 'Company', 'Exchange', 'Date', 'Price Range', 'Shares'] if col in df.columns]
-            if useful_cols:
-                df = df[useful_cols]
-                
-            return df
-    except Exception:
-        pass
+    if df.empty:
+        try:
+            url = "https://finance.yahoo.com/calendar/ipo"
+            resp = yf_session.get(url, timeout=10)
+            import io
+            tables = pd.read_html(io.StringIO(resp.text))
+            if tables:
+                df = tables[0]
+                df = df.fillna("TBD")
+                useful_cols = [col for col in ['Symbol', 'Company', 'Exchange', 'Date', 'Price Range', 'Shares'] if col in df.columns]
+                if useful_cols:
+                    df = df[useful_cols]
+        except Exception:
+            pass
 
-    # If both fail, or there are genuinely no IPOs
-    return pd.DataFrame()
+    # ADD VOLATILITY ESTIMATOR LOGIC
+    if not df.empty and 'Shares' in df.columns:
+        potentials = []
+        for val in df['Shares']:
+            val_str = str(val).replace(',', '').replace('$', '').strip().upper()
+            try:
+                if 'M' in val_str:
+                    shares = float(val_str.replace('M', '')) * 1000000
+                elif val_str == '-' or val_str == 'TBD' or val_str == 'NAN':
+                    shares = -1
+                else:
+                    shares = float(val_str)
+                    
+                # The Golden Day Trading Thresholds
+                if shares == -1:
+                    potentials.append("❓ Unknown")
+                elif shares <= 5000000:
+                    potentials.append("🔥 Extreme (Low Float)")
+                elif shares <= 15000000:
+                    potentials.append("⭐ High")
+                else:
+                    potentials.append("📊 Standard (Heavy)")
+            except ValueError:
+                potentials.append("❓ Unknown")
+                
+        # Insert the rating at the very front of the table
+        if 'Vol Potential' not in df.columns:
+            df.insert(0, 'Vol Potential', potentials)
+            
+    return df
 
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
