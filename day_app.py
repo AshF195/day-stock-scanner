@@ -85,12 +85,20 @@ def get_tickers(market):
             if ticker_col and name_col:
                 raw_tickers = df[ticker_col].astype(str).tolist()
                 names = df[name_col].astype(str).tolist()
-                clean_tickers = [t.replace(".", "-") if "FTSE" not in market else t + ".L" for t in raw_tickers]
+                
+                clean_tickers = []
+                for t in raw_tickers:
+                    # FIX: Always replace Wikipedia's dots with Yahoo's dashes FIRST
+                    t = t.replace(".", "-") 
+                    # THEN append the .L if it's a UK stock
+                    if "FTSE" in market:
+                        t = t + ".L"
+                    clean_tickers.append(t)
+                    
                 return list(zip(clean_tickers, names))
     except Exception:
         pass
     return []
-
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
