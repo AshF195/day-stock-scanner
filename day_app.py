@@ -10,7 +10,6 @@ import time
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
 
 # --- SESSION STATE INITIALIZATION ---
-# Watchlist is now a Dictionary to store BOTH Ticker and Company across different market scans
 if "watchlist" not in st.session_state or isinstance(st.session_state.watchlist, list):
     st.session_state.watchlist = {} 
 if "scan_results" not in st.session_state:
@@ -152,6 +151,15 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
 
+        # --- FIX: NaN SANITIZER ---
+        # Converts any missing 'NaN' data from Yahoo into 0.0 to prevent crash during integer math
+        gap_pct = float(np.nan_to_num(gap_pct))
+        rvol = float(np.nan_to_num(rvol))
+        adr = float(np.nan_to_num(adr))
+        vwap_dist = float(np.nan_to_num(vwap_dist))
+        current_rsi = float(np.nan_to_num(current_rsi))
+        day_change = float(np.nan_to_num(day_change))
+
         score = 0
         score += int(abs(gap_pct))
         if rvol > 0: score += int(rvol / 0.5)
@@ -163,14 +171,15 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         short_display = "N/A"
         try:
             info = stock.info or {} 
-            float_shares = info.get('floatShares', 0)
-            short_pct = info.get('shortPercentOfFloat', 0)
+            float_shares = info.get('floatShares')
+            short_pct = info.get('shortPercentOfFloat')
             
-            if float_shares and float_shares > 0:
+            # Added pd.isna() check to prevent crash if Yahoo returns NaN for share float
+            if float_shares and not pd.isna(float_shares) and float_shares > 0:
                 float_display = f"{float_shares / 1000000:.1f}M"
                 if float_shares < 60000000: score += int((60 - (float_shares / 1000000)) / 5) + 1
                 
-            if short_pct and short_pct > 0:
+            if short_pct and not pd.isna(short_pct) and short_pct > 0:
                 short_val = short_pct * 100
                 short_display = f"{short_val:.1f}%"
                 if short_val >= 5.0: score += int(short_val / 5)
@@ -223,7 +232,6 @@ def color_metrics(val, column):
     except ValueError:
         return ""
     
-    # RAG Formatting Rules
     if column == "Score":
         if num >= 10: return 'color: #33CC33; font-weight: bold'
         if num < 5: return 'color: #FF3333'
@@ -285,7 +293,6 @@ with tab_scan:
             results = []
             errors = []
             
-            # Workers manually set to 4 based on your testing
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
@@ -337,7 +344,6 @@ with tab_scan:
             }
         )
         
-        # Save updates to Watchlist dict WITHOUT wiping previous cross-market saves
         changes_made = False
         currently_tracked = edited_df[edited_df["Track"] == True]
         currently_untracked = edited_df[edited_df["Track"] == False]
@@ -368,7 +374,6 @@ with tab_watch:
             with st.spinner("Fetching live data for tracked stocks..."):
                 tracked_results = []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    # Pass the TRUE company name into the analyzer, not "Watchlist"
                     futures = {executor.submit(analyze_day_trading_metrics, (ticker, company), True): ticker for ticker, company in st.session_state.watchlist.items()}
                     for future in concurrent.futures.as_completed(futures):
                         try:
