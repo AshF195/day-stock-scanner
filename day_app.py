@@ -9,10 +9,8 @@ import time
 # ==========================================
 # 🛠️ YOUR CUSTOM GITHUB LISTS GO HERE 🛠️
 # ==========================================
-# Add as many as you want! Format: "Display Name": "Raw GitHub URL"
 CUSTOM_LISTS = {
-    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/AshF195/day-stock-scanner/refs/heads/main/ftse_smallcap.txt",
-    # "Another List": "https://raw.githubusercontent.com/...",
+    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ftse_smallcap.txt",
 }
 # ==========================================
 
@@ -60,7 +58,7 @@ def get_session():
 
 yf_session = get_session()
 
-# --- 1A. LIVE GAINERS SCRAPER (NEVER CACHED) ---
+# --- 1A. LIVE GAINERS SCRAPER ---
 def get_live_gainers(market):
     live_urls = {
         "US Day Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/day_gainers",
@@ -85,7 +83,7 @@ def get_live_gainers(market):
         st.error(f"⚠️ Live Scraper Error: {e}")
     return []
 
-# --- 1B. STATIC INDEX SCRAPER (CACHED FOR 24 HRS) ---
+# --- 1B. STATIC INDEX SCRAPER ---
 @st.cache_data(ttl=86400) 
 def get_static_tickers(market):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -116,6 +114,30 @@ def get_static_tickers(market):
     except Exception:
         pass
     return []
+
+# --- 1C. IPO CALENDAR SCRAPER ---
+@st.cache_data(ttl=3600) # Caches the list for 1 hour to prevent spamming the server
+def get_ipo_calendar():
+    try:
+        import io
+        url = "https://finance.yahoo.com/calendar/ipo"
+        resp = yf_session.get(url, timeout=10)
+        tables = pd.read_html(io.StringIO(resp.text))
+        
+        if tables:
+            df = tables[0]
+            # Clean up empty data
+            df = df.fillna("TBD")
+            
+            # Keep only the columns that actually matter to a day trader
+            useful_cols = [col for col in ['Symbol', 'Company', 'Exchange', 'Date', 'Price Range', 'Shares'] if col in df.columns]
+            if useful_cols:
+                df = df[useful_cols]
+                
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
@@ -161,7 +183,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
 
-        # NaN SANITIZER
         gap_pct = float(np.nan_to_num(gap_pct))
         rvol = float(np.nan_to_num(rvol))
         adr = float(np.nan_to_num(adr))
@@ -233,7 +254,7 @@ def color_status(val):
 def color_metrics(val, column):
     try:
         if isinstance(val, str):
-            if val == "N/A": return ""
+            if val == "N/A" or val == "TBD": return ""
             num = float(val.replace('M', '').replace('%', '').replace('x', ''))
         else:
             num = float(val)
@@ -271,13 +292,13 @@ def apply_styling(df):
                    .map(lambda x: color_metrics(x, "Short %"), subset=["Short %"])
 
 # --- TAB LAYOUT ---
-tab_scan, tab_watch = st.tabs(["🚀 Live Scanner", "🎯 My Watchlist"])
+# Added the 3rd tab here!
+tab_scan, tab_watch, tab_ipo = st.tabs(["🚀 Live Scanner", "🎯 My Watchlist", "📅 IPO Notice Board"])
 
 # ==========================================
 # TAB 1: MARKET SCANNER
 # ==========================================
 with tab_scan:
-    # Dynamically combine standard options with your custom GitHub lists
     market_choices = [
         "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
         "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual", "Upload Custom List (.txt)"
@@ -296,11 +317,9 @@ with tab_scan:
     if st.button("🚀 Scan Market", use_container_width=True):
         ticker_list = []
         
-        # 1. Manual Entry
         if market_choice == "Manual":
             ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
         
-        # 2. Local File Upload
         elif market_choice == "Upload Custom List (.txt)":
             if uploaded_file is not None:
                 content = uploaded_file.read().decode("utf-8").splitlines()
@@ -315,12 +334,11 @@ with tab_scan:
             else:
                 st.warning("⚠️ Please upload a .txt file before scanning.")
                 
-        # 3. Custom GitHub URL List
         elif market_choice in CUSTOM_LISTS:
             try:
                 st.info(f"Downloading {market_choice} from GitHub...")
                 resp = requests.get(CUSTOM_LISTS[market_choice], timeout=10)
-                resp.raise_for_status() # Check for 404 errors
+                resp.raise_for_status() 
                 
                 content = resp.text.splitlines()
                 for line in content:
@@ -334,11 +352,9 @@ with tab_scan:
             except Exception as e:
                 st.error(f"⚠️ Failed to fetch list from GitHub: {e}")
                 
-        # 4. Yahoo Live Gainers
         elif "Yahoo Live" in market_choice:
             ticker_list = get_live_gainers(market_choice) 
             
-        # 5. Wikipedia Scraping
         else:
             ticker_list = get_static_tickers(market_choice)
             
@@ -371,7 +387,6 @@ with tab_scan:
         elif market_choice not in ["Upload Custom List (.txt)"] and market_choice not in CUSTOM_LISTS.keys():
             st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
 
-    # Render the Scan Results Interactive Table
     if not st.session_state.scan_results.empty:
         st.subheader("🏆 Scanner Results")
         st.caption("Tick the box on the left to pin a stock to your Universal Watchlist.")
@@ -457,3 +472,22 @@ with tab_watch:
                             "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%")
                         }
                     )
+
+# ==========================================
+# TAB 3: IPO NOTICE BOARD
+# ==========================================
+with tab_ipo:
+    st.subheader("📅 Upcoming IPOs (Initial Public Offerings)")
+    st.markdown("Track brand new companies about to go live on the markets. Keep an eye on these for massive Day 1 volatility!")
+    
+    with st.spinner("Fetching this week's IPO calendar..."):
+        df_ipo = get_ipo_calendar()
+        
+        if not df_ipo.empty:
+            st.dataframe(
+                df_ipo,
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No upcoming IPOs found for this timeframe, or the calendar is temporarily unavailable.")
