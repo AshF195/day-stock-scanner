@@ -153,35 +153,37 @@ def get_ipo_calendar():
             pass
 
     # ADD VOLATILITY ESTIMATOR LOGIC
-    if not df.empty and 'Shares' in df.columns:
-        potentials = []
-        for val in df['Shares']:
-            val_str = str(val).replace(',', '').replace('$', '').strip().upper()
-            try:
-                if 'M' in val_str:
-                    shares = float(val_str.replace('M', '')) * 1000000
-                elif val_str == '-' or val_str == 'TBD' or val_str == 'NAN':
-                    shares = -1
-                else:
-                    shares = float(val_str)
-                    
-                # The Golden Day Trading Thresholds
-                if shares == -1:
+    if not df.empty:
+        # Find whichever column actually contains the word "Share"
+        shares_col = next((col for col in df.columns if 'share' in col.lower()), None)
+        
+        if shares_col:
+            potentials = []
+            for val in df[shares_col]:
+                val_str = str(val).replace(',', '').replace('$', '').strip().upper()
+                try:
+                    if 'M' in val_str:
+                        shares = float(val_str.replace('M', '').strip()) * 1000000
+                    elif val_str == '-' or val_str == 'TBD' or val_str == 'NAN':
+                        shares = -1
+                    else:
+                        shares = float(val_str)
+                        
+                    # The Golden Day Trading Thresholds
+                    if shares == -1:
+                        potentials.append("❓ Unknown")
+                    elif shares <= 5000000:
+                        potentials.append("🔥 Extreme (Low Float)")
+                    elif shares <= 15000000:
+                        potentials.append("⭐ High")
+                    else:
+                        potentials.append("📊 Standard (Heavy)")
+                except ValueError:
                     potentials.append("❓ Unknown")
-                elif shares <= 5000000:
-                    potentials.append("🔥 Extreme (Low Float)")
-                elif shares <= 15000000:
-                    potentials.append("⭐ High")
-                else:
-                    potentials.append("📊 Standard (Heavy)")
-            except ValueError:
-                potentials.append("❓ Unknown")
-                
-        # Insert the rating at the very front of the table
-        if 'Vol Potential' not in df.columns:
-            df.insert(0, 'Vol Potential', potentials)
-            
-    return df
+                    
+            # Insert the rating at the very front of the table
+            if 'Vol Potential' not in df.columns:
+                df.insert(0, 'Vol Potential', potentials)
 
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
