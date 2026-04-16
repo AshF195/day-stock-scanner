@@ -4,13 +4,12 @@ import pandas as pd
 import numpy as np
 import concurrent.futures
 import requests
-import time # <--- NEW: Add this to the top of your file
+import time
 
-# Mobile-friendly layout
+# --- MOBILE-FRIENDLY LAYOUT ---
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
 
 # --- SESSION STATE INITIALIZATION ---
-# This forces the app to remember your list and scanned data between clicks!
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "scan_results" not in st.session_state:
@@ -18,7 +17,7 @@ if "scan_results" not in st.session_state:
 
 st.title("⚡ Day Trade Momentum Scanner")
 
-with st.expander("📖 Scanner Cheat Sheet (How to read this)"):
+with st.expander("📖 Scanner Cheat Sheet"):
     st.markdown("""
     **The Grading Tiers:**
     * **🔥 S-Tier:** The absolute best setups. High volume, huge gaps, massive volatility.
@@ -60,9 +59,11 @@ def get_tickers(market):
             tables = pd.read_html(io.StringIO(resp.text))
             if tables:
                 df = tables[0]
-                tickers = df['Symbol'].astype(str).tolist()
+                raw_tickers = df['Symbol'].astype(str).tolist()
+                # FIX: Strip out hidden graphical junk Yahoo puts in the symbol column (e.g. "A AXTI" -> "AXTI")
+                clean_tickers = [t.split()[-1].upper() for t in raw_tickers]
                 names = df['Name'].astype(str).tolist()
-                return list(zip(tickers, names))
+                return list(zip(clean_tickers, names))
         except Exception:
             return []
             
@@ -88,22 +89,21 @@ def get_tickers(market):
                 
                 clean_tickers = []
                 for t in raw_tickers:
-                    # FIX: Always replace Wikipedia's dots with Yahoo's dashes FIRST
+                    # Fix Wikipedia formatting vs Yahoo formatting
                     t = t.replace(".", "-") 
-                    # THEN append the .L if it's a UK stock
                     if "FTSE" in market:
                         t = t + ".L"
                     clean_tickers.append(t)
-                    
                 return list(zip(clean_tickers, names))
     except Exception:
         pass
     return []
+
 # --- 2. SCORING LOGIC ---
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
     
-    # Add a tiny pause so Yahoo doesn't think we are a DDoS bot
+    # Pause to prevent API rate limits
     time.sleep(0.5) 
     
     try:
@@ -154,10 +154,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         
         if score < 3 and not is_tracking: return None
 
-        # --- PHASE 3: Deep Analytics (Now wrapped in safety for UK stocks) ---
+        # Deep Analytics (Protected for missing UK Data)
         float_display = "N/A"
         short_display = "N/A"
-        
         try:
             info = stock.info or {} 
             float_shares = info.get('floatShares', 0)
@@ -172,9 +171,8 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
                 short_display = f"{short_val:.1f}%"
                 if short_val >= 5.0: score += int(short_val / 5)
         except Exception:
-            pass # If Yahoo crashes on the info scrape, just ignore it and keep the stock!
+            pass 
 
-        # --- TIERING ---
         if score >= 15: tier = "🔥 S-Tier"
         elif score >= 10: tier = "⭐ A-Tier"
         elif score >= 5: tier = "👍 B-Tier"
@@ -185,8 +183,10 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         elif vwap_dist > 4.0 or current_rsi > 75: crest_status = "⚠️ Cresting"
         elif current_price < current_vwap: crest_status = "📉 Under VWAP"
 
+        # Reordered so Company is exactly next to Ticker
         return {
             "Ticker": ticker,
+            "Company": company_name, 
             "Tier": tier,
             "Score": score,
             "Status": crest_status,
@@ -196,18 +196,23 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             "RVOL": round(rvol, 2),
             "VWAP Dist %": round(vwap_dist, 2),
             "Float": float_display,
-            "Short %": short_display,
-            "Company": company_name
+            "Short %": short_display
         }
     except Exception as e:
         raise Exception(f"API Error - {str(e)}")
 
-# --- UI STYLING FUNCTION ---
-def row_style(row):
-    if "PEAK" in str(row['Status']): return ['background-color: #4a0000; color: white'] * len(row)
-    if "Cresting" in str(row['Status']): return ['background-color: #4a3b00; color: white'] * len(row)
-    if "Under VWAP" in str(row['Status']): return ['color: #ff6666'] * len(row)
-    return [''] * len(row)
+# --- UI STYLING FUNCTION (RAG Text Formatting) ---
+def color_status(val):
+    val_str = str(val)
+    if "PEAK" in val_str: 
+        return 'color: #FF3333; font-weight: bold'  # Red
+    if "Cresting" in val_str: 
+        return 'color: #FFaa00; font-weight: bold'  # Amber
+    if "Run" in val_str: 
+        return 'color: #33CC33; font-weight: bold'  # Green
+    if "Under VWAP" in val_str: 
+        return 'color: #CC0000'                     # Dark Red
+    return ''
 
 # --- TOP SECTION: LIVE WATCHLIST ---
 if st.session_state.watchlist:
@@ -217,25 +222,30 @@ if st.session_state.watchlist:
         with st.spinner("Fetching live data..."):
             tracked_results = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # Pass is_tracking=True so they don't get filtered out
                 futures = {executor.submit(analyze_day_trading_metrics, (t, "Watchlist"), True): t for t in st.session_state.watchlist}
                 for future in concurrent.futures.as_completed(futures):
-                    res = future.result()
-                    if res: tracked_results.append(res)
+                    try:
+                        res = future.result()
+                        if res: tracked_results.append(res)
+                    except Exception:
+                        pass
             
             if tracked_results:
                 df_tracked = pd.DataFrame(tracked_results).sort_values(by="Score", ascending=False)
                 
-                # --- SELL ALERT LOGIC ---
                 sell_warnings = df_tracked[df_tracked['Status'].isin(["🚨 PEAK", "⚠️ Cresting"])]['Ticker'].tolist()
                 if sell_warnings:
                     st.error(f"**⚠️ SELL WARNING:** Momentum is overextended on: **{', '.join(sell_warnings)}**. Consider taking profits!")
                 
                 st.dataframe(
-                    df_tracked.drop(columns=['Company']).style.apply(row_style, axis=1),
+                    df_tracked.style.map(color_status, subset=["Status"]),
                     hide_index=True,
                     use_container_width=True,
                     column_config={
+                        "Status": st.column_config.TextColumn(
+                            "Status", 
+                            help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, high dump probability.\n📉 Under VWAP: Momentum dying."
+                        ),
                         "Price": st.column_config.NumberColumn("Price", format="%.2f"),
                         "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
                         "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
@@ -261,8 +271,9 @@ if st.button("🚀 Scan Market", use_container_width=True):
         st.info(f"Scanning {len(ticker_list)} stocks...")
         progress_bar = st.progress(0)
         results = []
-        errors = [] # <-- NEW: List to catch errors
+        errors = []
         
+        # Throttled to 2 workers to respect rate limits
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
@@ -271,11 +282,10 @@ if st.button("🚀 Scan Market", use_container_width=True):
                     res = future.result()
                     if res: results.append(res)
                 except Exception as e:
-                    # <-- NEW: If a stock crashes completely, catch it here!
                     errors.append(f"{futures[future][0]}: {str(e)}") 
                     
-        if errors:
-            st.error(f"⚠️ Caught {len(errors)} critical API errors during the scan!")
+        if errors and len(errors) > 5:
+            st.error(f"⚠️ Caught {len(errors)} API timeouts. Yahoo may be rate-limiting.")
             with st.expander("View Error Logs"):
                 st.write(errors)
 
@@ -291,15 +301,24 @@ if not st.session_state.scan_results.empty:
     st.caption("Tick the box on the left to pin a stock to your Live Watchlist at the top.")
     
     df_display = st.session_state.scan_results.copy()
-    df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
+    
+    # Catch edge case if user tries to scan manual ticker that's already in watchlist
+    if 'Track' not in df_display.columns:
+        df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
+    else:
+        df_display["Track"] = df_display["Ticker"].isin(st.session_state.watchlist)
     
     edited_df = st.data_editor(
-        df_display.drop(columns=['Company']).style.apply(row_style, axis=1),
+        df_display.style.map(color_status, subset=["Status"]),
         hide_index=True,
         use_container_width=True,
         disabled=[col for col in df_display.columns if col not in ["Track"]], 
         column_config={
             "Track": st.column_config.CheckboxColumn("📌 Track"),
+            "Status": st.column_config.TextColumn(
+                "Status", 
+                help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, high dump probability.\n📉 Under VWAP: Momentum dying."
+            ),
             "Price": st.column_config.NumberColumn("Price", format="%.2f"),
             "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
             "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
