@@ -11,7 +11,7 @@ import time
 # ==========================================
 # Add as many as you want! Format: "Display Name": "Raw GitHub URL"
 CUSTOM_LISTS = {
-    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ftse_smallcap.txt",
+    "FTSE SmallCap (GitHub)": "https://github.com/AshF195/day-stock-scanner/blob/4109c7121a7ba68448b12ffd70165a8f8a75bd11/ftse_smallcap.txt",
     # "Another List": "https://raw.githubusercontent.com/...",
 }
 # ==========================================
