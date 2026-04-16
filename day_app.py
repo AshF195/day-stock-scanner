@@ -17,13 +17,19 @@ if "scan_results" not in st.session_state:
 
 st.title("⚡ Day Trade Momentum Scanner")
 
-with st.expander("📖 Scanner Cheat Sheet"):
+with st.expander("📖 Scanner Cheat Sheet & Status Explanations"):
     st.markdown("""
     **The Grading Tiers:**
     * **🔥 S-Tier:** The absolute best setups. High volume, huge gaps, massive volatility.
     * **⭐ A-Tier:** Great setups with strong momentum.
     * **👍 B-Tier:** Acceptable setups, but might lack extreme volume or volatility.
     
+    **Status Indicators (The VWAP Rubber Band):**
+    * 🟢 **Run:** Active momentum, volume is supporting the price.
+    * ⚠️ **Cresting:** Overbought, price is outpacing volume. Getting stretched from the VWAP.
+    * 🚨 **PEAK:** Extremely overbought and dangerous. High probability of a sudden dump.
+    * 📉 **Under VWAP:** Stock is losing the intraday battle to sellers. Momentum dying.
+
     **Dynamic Scoring Metrics:**
     * **RVOL:** 1 point per 0.5x increase in Relative Volume.
     * **Gap %:** 1 point per 1% of gap (up or down).
@@ -39,34 +45,45 @@ def get_session():
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     })
+    # Inject a consent cookie to bypass Yahoo's EU/UK privacy blocker popups!
+    session.cookies.set('CONSENT', 'YES+cb', domain='.yahoo.com')
     return session
 
 yf_session = get_session()
 
-# --- 1. INDEX SCRAPER ---
-@st.cache_data(ttl=300) 
-def get_tickers(market):
+# --- 1A. LIVE GAINERS SCRAPER (NEVER CACHED) ---
+def get_live_gainers(market):
     live_urls = {
         "US Day Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/day_gainers",
         "US Pre-Market Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/premarket_gainers",
         "UK Day Gainers (Yahoo Live)": "https://uk.finance.yahoo.com/screener/predefined/day_gainers"
     }
-    
-    if market in live_urls:
-        try:
-            import io
-            resp = yf_session.get(live_urls[market])
-            tables = pd.read_html(io.StringIO(resp.text))
-            if tables:
-                df = tables[0]
-                raw_tickers = df['Symbol'].astype(str).tolist()
-                # FIX: Strip out hidden graphical junk Yahoo puts in the symbol column (e.g. "A AXTI" -> "AXTI")
-                clean_tickers = [t.split()[-1].upper() for t in raw_tickers]
-                names = df['Name'].astype(str).tolist()
-                return list(zip(clean_tickers, names))
-        except Exception:
-            return []
+    try:
+        import io
+        resp = yf_session.get(live_urls[market], timeout=10)
+        tables = pd.read_html(io.StringIO(resp.text))
+        
+        if tables:
+            df = tables[0]
+            # Drop empty rows to prevent crashes
+            df = df.dropna(subset=['Symbol'])
+            raw_tickers = df['Symbol'].astype(str).tolist()
             
+            # Strip out hidden graphical junk Yahoo puts in the symbol column (e.g. "A AXTI" -> "AXTI")
+            clean_tickers = [t.split()[-1].upper() for t in raw_tickers if t.strip()]
+            names = df['Name'].astype(str).tolist() if 'Name' in df.columns else [""] * len(clean_tickers)
+            
+            return list(zip(clean_tickers, names))
+            
+    except ValueError:
+        st.error("⚠️ Yahoo blocked the scraper (No tables found). Wait 1 minute and try again.")
+    except Exception as e:
+        st.error(f"⚠️ Live Scraper Error: {e}")
+    return []
+
+# --- 1B. STATIC INDEX SCRAPER (CACHED FOR 24 HRS) ---
+@st.cache_data(ttl=86400) 
+def get_static_tickers(market):
     headers = {'User-Agent': 'Mozilla/5.0'}
     urls = {
         "Nasdaq 100 (US)": "https://en.wikipedia.org/wiki/Nasdaq-100",
@@ -74,8 +91,6 @@ def get_tickers(market):
         "FTSE 100 (UK)": "https://en.wikipedia.org/wiki/FTSE_100_Index",
         "FTSE 250 (UK)": "https://en.wikipedia.org/wiki/FTSE_250_Index"
     }
-    
-    if market not in urls: return []
     try:
         tables = pd.read_html(urls[market], storage_options=headers)
         for df in tables:
@@ -89,7 +104,6 @@ def get_tickers(market):
                 
                 clean_tickers = []
                 for t in raw_tickers:
-                    # Fix Wikipedia formatting vs Yahoo formatting
                     t = t.replace(".", "-") 
                     if "FTSE" in market:
                         t = t + ".L"
@@ -183,7 +197,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         elif vwap_dist > 4.0 or current_rsi > 75: crest_status = "⚠️ Cresting"
         elif current_price < current_vwap: crest_status = "📉 Under VWAP"
 
-        # Reordered so Company is exactly next to Ticker
         return {
             "Ticker": ticker,
             "Company": company_name, 
@@ -204,14 +217,10 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
 # --- UI STYLING FUNCTION (RAG Text Formatting) ---
 def color_status(val):
     val_str = str(val)
-    if "PEAK" in val_str: 
-        return 'color: #FF3333; font-weight: bold'  # Red
-    if "Cresting" in val_str: 
-        return 'color: #FFaa00; font-weight: bold'  # Amber
-    if "Run" in val_str: 
-        return 'color: #33CC33; font-weight: bold'  # Green
-    if "Under VWAP" in val_str: 
-        return 'color: #CC0000'                     # Dark Red
+    if "PEAK" in val_str: return 'color: #FF3333; font-weight: bold'  
+    if "Cresting" in val_str: return 'color: #FFaa00; font-weight: bold'  
+    if "Run" in val_str: return 'color: #33CC33; font-weight: bold'  
+    if "Under VWAP" in val_str: return 'color: #CC0000'                     
     return ''
 
 # --- TOP SECTION: LIVE WATCHLIST ---
@@ -242,10 +251,7 @@ if st.session_state.watchlist:
                     hide_index=True,
                     use_container_width=True,
                     column_config={
-                        "Status": st.column_config.TextColumn(
-                            "Status", 
-                            help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, high dump probability.\n📉 Under VWAP: Momentum dying."
-                        ),
+                        "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, dump imminent.\n📉 Under VWAP: Momentum dying."),
                         "Price": st.column_config.NumberColumn("Price", format="%.2f"),
                         "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
                         "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
@@ -265,7 +271,14 @@ if market_choice == "Manual":
     manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
 
 if st.button("🚀 Scan Market", use_container_width=True):
-    ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()] if market_choice == "Manual" else get_tickers(market_choice)
+    
+    # Check which scraping method to use
+    if market_choice == "Manual":
+        ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
+    elif "Yahoo Live" in market_choice:
+        ticker_list = get_live_gainers(market_choice) # Bypasses cache entirely
+    else:
+        ticker_list = get_static_tickers(market_choice)
         
     if ticker_list:
         st.info(f"Scanning {len(ticker_list)} stocks...")
@@ -273,8 +286,7 @@ if st.button("🚀 Scan Market", use_container_width=True):
         results = []
         errors = []
         
-        # Throttled to 2 workers to respect rate limits
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 progress_bar.progress((i + 1) / len(ticker_list))
@@ -294,6 +306,9 @@ if st.button("🚀 Scan Market", use_container_width=True):
         else:
             st.warning("No stocks met the criteria right now.")
             st.session_state.scan_results = pd.DataFrame()
+    else:
+        # Added explicit warning if the scraper fails to find anything entirely
+        st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
 
 # Render the Scan Results Interactive Table
 if not st.session_state.scan_results.empty:
@@ -302,7 +317,6 @@ if not st.session_state.scan_results.empty:
     
     df_display = st.session_state.scan_results.copy()
     
-    # Catch edge case if user tries to scan manual ticker that's already in watchlist
     if 'Track' not in df_display.columns:
         df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
     else:
@@ -315,10 +329,7 @@ if not st.session_state.scan_results.empty:
         disabled=[col for col in df_display.columns if col not in ["Track"]], 
         column_config={
             "Track": st.column_config.CheckboxColumn("📌 Track"),
-            "Status": st.column_config.TextColumn(
-                "Status", 
-                help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, high dump probability.\n📉 Under VWAP: Momentum dying."
-            ),
+            "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought, getting stretched.\n🚨 PEAK: Extremely overbought, dump imminent.\n📉 Under VWAP: Momentum dying."),
             "Price": st.column_config.NumberColumn("Price", format="%.2f"),
             "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
             "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
