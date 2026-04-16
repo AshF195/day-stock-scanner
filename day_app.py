@@ -239,15 +239,25 @@ if st.button("🚀 Scan Market", use_container_width=True):
         st.info(f"Scanning {len(ticker_list)} stocks...")
         progress_bar = st.progress(0)
         results = []
+        errors = [] # <-- NEW: List to catch errors
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 progress_bar.progress((i + 1) / len(ticker_list))
-                res = future.result()
-                if res: results.append(res)
+                try:
+                    res = future.result()
+                    if res: results.append(res)
+                except Exception as e:
+                    # <-- NEW: If a stock crashes completely, catch it here!
+                    errors.append(f"{futures[future][0]}: {str(e)}") 
                     
+        if errors:
+            st.error(f"⚠️ Caught {len(errors)} critical API errors during the scan!")
+            with st.expander("View Error Logs"):
+                st.write(errors)
+
         if results:
-            # Save the scan to Session State so it survives reruns
             st.session_state.scan_results = pd.DataFrame(results).sort_values(by="Score", ascending=False)
         else:
             st.warning("No stocks met the criteria right now.")
@@ -259,16 +269,13 @@ if not st.session_state.scan_results.empty:
     st.caption("Tick the box on the left to pin a stock to your Live Watchlist at the top.")
     
     df_display = st.session_state.scan_results.copy()
-    
-    # Add a boolean column to check if the ticker is already in the watchlist
     df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
     
-    # Use data_editor so the user can tick boxes
     edited_df = st.data_editor(
         df_display.drop(columns=['Company']).style.apply(row_style, axis=1),
         hide_index=True,
         use_container_width=True,
-        disabled=[col for col in df_display.columns if col not in ["Track"]], # Lock all columns except the checkbox
+        disabled=[col for col in df_display.columns if col not in ["Track"]], 
         column_config={
             "Track": st.column_config.CheckboxColumn("📌 Track"),
             "Price": st.column_config.NumberColumn("Price", format="%.2f"),
@@ -277,7 +284,6 @@ if not st.session_state.scan_results.empty:
         }
     )
     
-    # If the user ticks/unticks a box, update the watchlist and automatically rerun
     new_watchlist = edited_df[edited_df["Track"] == True]["Ticker"].tolist()
     if set(new_watchlist) != set(st.session_state.watchlist):
         st.session_state.watchlist = new_watchlist
