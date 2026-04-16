@@ -116,20 +116,41 @@ def get_static_tickers(market):
     return []
 
 # --- 1C. IPO CALENDAR SCRAPER ---
-@st.cache_data(ttl=3600) # Caches the list for 1 hour to prevent spamming the server
+@st.cache_data(ttl=3600) # Caches the list for 1 hour
 def get_ipo_calendar():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+    }
+    
+    # SOURCE 1: Try StockAnalysis (Highly reliable, clean table)
     try:
+        url = "https://stockanalysis.com/ipos/calendar/"
+        resp = requests.get(url, headers=headers, timeout=10)
+        
         import io
-        url = "https://finance.yahoo.com/calendar/ipo"
-        resp = yf_session.get(url, timeout=10)
         tables = pd.read_html(io.StringIO(resp.text))
         
         if tables:
             df = tables[0]
-            # Clean up empty data
+            # StockAnalysis uses slightly different column names, let's clean them up
+            df = df.fillna("TBD")
+            return df
+    except Exception:
+        pass # If it fails, move on to the backup source
+
+    # SOURCE 2: Backup - Yahoo Finance
+    try:
+        url = "https://finance.yahoo.com/calendar/ipo"
+        resp = yf_session.get(url, timeout=10)
+        
+        import io
+        tables = pd.read_html(io.StringIO(resp.text))
+        
+        if tables:
+            df = tables[0]
             df = df.fillna("TBD")
             
-            # Keep only the columns that actually matter to a day trader
+            # Keep only the columns that actually matter
             useful_cols = [col for col in ['Symbol', 'Company', 'Exchange', 'Date', 'Price Range', 'Shares'] if col in df.columns]
             if useful_cols:
                 df = df[useful_cols]
@@ -137,6 +158,8 @@ def get_ipo_calendar():
             return df
     except Exception:
         pass
+
+    # If both fail, or there are genuinely no IPOs
     return pd.DataFrame()
 
 # --- 2. SCORING LOGIC ---
