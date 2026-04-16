@@ -94,8 +94,15 @@ def get_tickers(market):
 def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
     try:
-        stock = yf.Ticker(ticker, session=yf_session)
+        # FIX: Removed session=yf_session so yfinance can generate its own cookies!
+        stock = yf.Ticker(ticker)
+        
         df_daily = stock.history(period="1mo")
+        
+        # FIX: Force an error if Yahoo silently blocks the download
+        if df_daily.empty: 
+            raise Exception("Yahoo Finance returned empty data (Blocked or Rate Limited)")
+            
         if len(df_daily) < 15: return None
             
         prev_close = df_daily['Close'].iloc[-2]
@@ -137,6 +144,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         
         if score < 3 and not is_tracking: return None
 
+        # Deep Analytics for Float & Short
         info = stock.info or {} 
         float_shares = info.get('floatShares', 0)
         short_pct = info.get('shortPercentOfFloat', 0)
@@ -160,7 +168,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         crest_status = "🟢 Run"
         if vwap_dist > 6.0 and current_rsi > 75: crest_status = "🚨 PEAK"
         elif vwap_dist > 4.0 or current_rsi > 75: crest_status = "⚠️ Cresting"
-        # Alert if stock drops under VWAP (losing momentum)
         elif current_price < current_vwap: crest_status = "📉 Under VWAP"
 
         return {
@@ -177,8 +184,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             "Short %": short_display,
             "Company": company_name
         }
-    except Exception:
-        return None
+    except Exception as e:
+        # Force the error up to the UI so we can see it
+        raise Exception(f"API Error - {str(e)}")
 
 # --- UI STYLING FUNCTION ---
 def row_style(row):
