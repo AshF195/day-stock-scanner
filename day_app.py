@@ -8,9 +8,15 @@ import requests
 # Mobile-friendly layout
 st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
 
+# --- SESSION STATE INITIALIZATION ---
+# This forces the app to remember your list and scanned data between clicks!
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = []
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = pd.DataFrame()
+
 st.title("⚡ Day Trade Momentum Scanner")
 
-# --- UI EXPLANATIONS ---
 with st.expander("📖 Scanner Cheat Sheet (How to read this)"):
     st.markdown("""
     **The Grading Tiers:**
@@ -19,41 +25,55 @@ with st.expander("📖 Scanner Cheat Sheet (How to read this)"):
     * **👍 B-Tier:** Acceptable setups, but might lack extreme volume or volatility.
     
     **Dynamic Scoring Metrics:**
-    * **RVOL:** 1 point awarded per 0.5x increase in Relative Volume.
-    * **Gap %:** 1 point awarded per 1% of gap (up or down).
-    * **ADR:** 1 point awarded per 1% of Average Daily Range (starting at 1%).
-    * **Float Size:** +1 point for under 60M shares, scaling up +1 point for every 5M shares lower.
-    * **Short %:** +1 point for over 5% short interest, scaling up +1 point for every 5% higher.
+    * **RVOL:** 1 point per 0.5x increase in Relative Volume.
+    * **Gap %:** 1 point per 1% of gap (up or down).
+    * **ADR:** 1 point per 1% of Average Daily Range (starting at 1%).
+    * **Float Size:** +1 point for under 60M shares, scaling up +1 for every 5M lower.
+    * **Short %:** +1 point for over 5% short interest, scaling up +1 for every 5% higher.
     """)
 
-# --- WEB SESSION SETUP (To prevent Yahoo rate-limiting) ---
+# --- WEB SESSION SETUP ---
 @st.cache_resource
 def get_session():
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
     })
     return session
 
 yf_session = get_session()
 
 # --- 1. INDEX SCRAPER ---
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=300) 
 def get_tickers(market):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+    live_urls = {
+        "US Day Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/day_gainers",
+        "US Pre-Market Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/premarket_gainers",
+        "UK Day Gainers (Yahoo Live)": "https://uk.finance.yahoo.com/screener/predefined/day_gainers"
+    }
+    
+    if market in live_urls:
+        try:
+            import io
+            resp = yf_session.get(live_urls[market])
+            tables = pd.read_html(io.StringIO(resp.text))
+            if tables:
+                df = tables[0]
+                tickers = df['Symbol'].astype(str).tolist()
+                names = df['Name'].astype(str).tolist()
+                return list(zip(tickers, names))
+        except Exception:
+            return []
+            
+    headers = {'User-Agent': 'Mozilla/5.0'}
     urls = {
         "Nasdaq 100 (US)": "https://en.wikipedia.org/wiki/Nasdaq-100",
         "S&P 500 (US)": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        "S&P 400 MidCap (US)": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
-        "S&P 600 SmallCap (US)": "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies",
-        "Dow Jones (US)": "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
         "FTSE 100 (UK)": "https://en.wikipedia.org/wiki/FTSE_100_Index",
         "FTSE 250 (UK)": "https://en.wikipedia.org/wiki/FTSE_250_Index"
     }
     
     if market not in urls: return []
-    
     try:
         tables = pd.read_html(urls[market], storage_options=headers)
         for df in tables:
@@ -64,27 +84,17 @@ def get_tickers(market):
             if ticker_col and name_col:
                 raw_tickers = df[ticker_col].astype(str).tolist()
                 names = df[name_col].astype(str).tolist()
-                
-                clean_tickers = []
-                for t in raw_tickers:
-                    if "FTSE" not in market:
-                        t = t.replace(".", "-")
-                    else:
-                        t = t + ".L"
-                    clean_tickers.append(t)
+                clean_tickers = [t.replace(".", "-") if "FTSE" not in market else t + ".L" for t in raw_tickers]
                 return list(zip(clean_tickers, names))
     except Exception:
         pass
     return []
 
 # --- 2. SCORING LOGIC ---
-def analyze_day_trading_metrics(ticker_info):
+def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
     try:
-        # Use our custom Chrome disguise session for Yahoo Finance
         stock = yf.Ticker(ticker, session=yf_session)
-        
-        # --- PHASE 1: Basic Technicals ---
         df_daily = stock.history(period="1mo")
         if len(df_daily) < 15: return None
             
@@ -93,7 +103,7 @@ def analyze_day_trading_metrics(ticker_info):
         today_vol = df_daily['Volume'].iloc[-1]
         avg_vol = df_daily['Volume'].iloc[-15:-1].mean()
         
-        if avg_vol < 100000: return None # Keep illiquid filter
+        if avg_vol < 100000 and not is_tracking: return None 
         
         rvol = today_vol / avg_vol if avg_vol > 0 else 0
         gap_pct = ((today_open - prev_close) / prev_close) * 100
@@ -101,10 +111,8 @@ def analyze_day_trading_metrics(ticker_info):
         df_daily['Daily_Range'] = (df_daily['High'] - df_daily['Low']) / df_daily['Close'].shift(1)
         adr = df_daily['Daily_Range'].iloc[-15:-1].mean() * 100
         
-        # Kill dead stocks immediately to save time (Must be dead in ALL 3 metrics to drop)
-        if rvol < 1.0 and abs(gap_pct) < 1.0 and adr < 1.5: return None
+        if rvol < 1.0 and abs(gap_pct) < 1.0 and adr < 1.5 and not is_tracking: return None
 
-        # --- PHASE 2: Intraday VWAP & RSI ---
         df_intra = stock.history(period="1d", interval="5m")
         if df_intra.empty or len(df_intra) < 14: return None
         
@@ -122,37 +130,28 @@ def analyze_day_trading_metrics(ticker_info):
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
 
-        # Calculate Base Score (Dynamic Math Scaling)
         score = 0
         score += int(abs(gap_pct))
         if rvol > 0: score += int(rvol / 0.5)
         if adr >= 1.0: score += int(adr)
         
-        if score < 3: return None
+        if score < 3 and not is_tracking: return None
 
-        # --- PHASE 3: Deep Analytics ---
-        # "or {}" protects against Yahoo returning NoneType if connection drops
         info = stock.info or {} 
-        
         float_shares = info.get('floatShares', 0)
         short_pct = info.get('shortPercentOfFloat', 0)
         
         float_display = "N/A"
         if float_shares and float_shares > 0:
             float_display = f"{float_shares / 1000000:.1f}M"
-            if float_shares < 60000000:
-                float_points = int((60 - (float_shares / 1000000)) / 5) + 1
-                score += float_points
+            if float_shares < 60000000: score += int((60 - (float_shares / 1000000)) / 5) + 1
             
         short_display = "N/A"
-        if short_pct is not None and short_pct > 0:
+        if short_pct and short_pct > 0:
             short_val = short_pct * 100
             short_display = f"{short_val:.1f}%"
-            if short_val >= 5.0:
-                short_points = int(short_val / 5)
-                score += short_points
+            if short_val >= 5.0: score += int(short_val / 5)
 
-        # TIERING
         if score >= 15: tier = "🔥 S-Tier"
         elif score >= 10: tier = "⭐ A-Tier"
         elif score >= 5: tier = "👍 B-Tier"
@@ -161,45 +160,85 @@ def analyze_day_trading_metrics(ticker_info):
         crest_status = "🟢 Run"
         if vwap_dist > 6.0 and current_rsi > 75: crest_status = "🚨 PEAK"
         elif vwap_dist > 4.0 or current_rsi > 75: crest_status = "⚠️ Cresting"
+        # Alert if stock drops under VWAP (losing momentum)
+        elif current_price < current_vwap: crest_status = "📉 Under VWAP"
 
         return {
+            "Ticker": ticker,
             "Tier": tier,
             "Score": score,
-            "Ticker": ticker,
             "Status": crest_status,
             "Price": round(current_price, 2),
             "Chg %": round(day_change, 2),
             "Gap %": round(gap_pct, 2),
             "RVOL": round(rvol, 2),
+            "VWAP Dist %": round(vwap_dist, 2),
             "Float": float_display,
             "Short %": short_display,
-            "VWAP Dist %": round(vwap_dist, 2),
             "Company": company_name
         }
-    except Exception as e:
-        # Silently fail instead of crashing the whole app
+    except Exception:
         return None
 
-# --- 3. UI & EXECUTION ---
+# --- UI STYLING FUNCTION ---
+def row_style(row):
+    if "PEAK" in str(row['Status']): return ['background-color: #4a0000; color: white'] * len(row)
+    if "Cresting" in str(row['Status']): return ['background-color: #4a3b00; color: white'] * len(row)
+    if "Under VWAP" in str(row['Status']): return ['color: #ff6666'] * len(row)
+    return [''] * len(row)
+
+# --- TOP SECTION: LIVE WATCHLIST ---
+if st.session_state.watchlist:
+    st.success("🎯 **Active Watchlist** (Pinned)")
+    
+    if st.button("🔄 Refresh Watchlist Prices", type="primary"):
+        with st.spinner("Fetching live data..."):
+            tracked_results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # Pass is_tracking=True so they don't get filtered out
+                futures = {executor.submit(analyze_day_trading_metrics, (t, "Watchlist"), True): t for t in st.session_state.watchlist}
+                for future in concurrent.futures.as_completed(futures):
+                    res = future.result()
+                    if res: tracked_results.append(res)
+            
+            if tracked_results:
+                df_tracked = pd.DataFrame(tracked_results).sort_values(by="Score", ascending=False)
+                
+                # --- SELL ALERT LOGIC ---
+                sell_warnings = df_tracked[df_tracked['Status'].isin(["🚨 PEAK", "⚠️ Cresting"])]['Ticker'].tolist()
+                if sell_warnings:
+                    st.error(f"**⚠️ SELL WARNING:** Momentum is overextended on: **{', '.join(sell_warnings)}**. Consider taking profits!")
+                
+                st.dataframe(
+                    df_tracked.drop(columns=['Company']).style.apply(row_style, axis=1),
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Price": st.column_config.NumberColumn("Price", format="%.2f"),
+                        "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+                        "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
+                    }
+                )
+    st.divider()
+
+# --- BOTTOM SECTION: MARKET SCANNER ---
 market_choices = [
-    "Nasdaq 100 (US)", "S&P 500 (US)", "S&P 400 MidCap (US)", "S&P 600 SmallCap (US)", 
-    "Dow Jones (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual"
+    "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
+    "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual"
 ]
-market_choice = st.selectbox("🌍 Select Market:", market_choices)
+market_choice = st.selectbox("🌍 Select Market to Scan:", market_choices)
 
 manual_tickers = ""
 if market_choice == "Manual":
     manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
 
-if st.button("🚀 Scan Market", type="primary", use_container_width=True):
-    ticker_list = [(t.strip().upper(), "Manual Entry") for t in manual_tickers.split(",") if t.strip()] if market_choice == "Manual" else get_tickers(market_choice)
+if st.button("🚀 Scan Market", use_container_width=True):
+    ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()] if market_choice == "Manual" else get_tickers(market_choice)
         
     if ticker_list:
         st.info(f"Scanning {len(ticker_list)} stocks...")
         progress_bar = st.progress(0)
-        
         results = []
-        # Restrict max workers to 5 so Yahoo doesn't get overwhelmed
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
@@ -208,36 +247,38 @@ if st.button("🚀 Scan Market", type="primary", use_container_width=True):
                 if res: results.append(res)
                     
         if results:
-            df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
-            
-            st.divider()
-            st.subheader("🏆 Top 10 High-Conviction Setups")
-            
-            top_10_df = df.head(10).drop(columns=['Company']) 
-            
-            def row_style(row):
-                if "PEAK" in str(row['Status']): return ['background-color: #4a0000; color: white'] * len(row)
-                if "Cresting" in str(row['Status']): return ['background-color: #4a3b00; color: white'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                top_10_df.style.apply(row_style, axis=1),
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                    "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-                    "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
-                    "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
-                    "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%"),
-                }
-            )
-            
-            if len(df) > 10:
-                with st.expander(f"View Remaining {len(df) - 10} Active Stocks"):
-                    st.dataframe(df.iloc[10:].drop(columns=['Company']).style.apply(row_style, axis=1), hide_index=True, use_container_width=True)
-                    
+            # Save the scan to Session State so it survives reruns
+            st.session_state.scan_results = pd.DataFrame(results).sort_values(by="Score", ascending=False)
         else:
-            st.warning("No stocks met the required volatility, volume, or momentum criteria right now.")
-    else:
-        st.error("No tickers found or could not connect to index data.")
+            st.warning("No stocks met the criteria right now.")
+            st.session_state.scan_results = pd.DataFrame()
+
+# Render the Scan Results Interactive Table
+if not st.session_state.scan_results.empty:
+    st.subheader("🏆 Scanner Results")
+    st.caption("Tick the box on the left to pin a stock to your Live Watchlist at the top.")
+    
+    df_display = st.session_state.scan_results.copy()
+    
+    # Add a boolean column to check if the ticker is already in the watchlist
+    df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist))
+    
+    # Use data_editor so the user can tick boxes
+    edited_df = st.data_editor(
+        df_display.drop(columns=['Company']).style.apply(row_style, axis=1),
+        hide_index=True,
+        use_container_width=True,
+        disabled=[col for col in df_display.columns if col not in ["Track"]], # Lock all columns except the checkbox
+        column_config={
+            "Track": st.column_config.CheckboxColumn("📌 Track"),
+            "Price": st.column_config.NumberColumn("Price", format="%.2f"),
+            "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
+            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx")
+        }
+    )
+    
+    # If the user ticks/unticks a box, update the watchlist and automatically rerun
+    new_watchlist = edited_df[edited_df["Track"] == True]["Ticker"].tolist()
+    if set(new_watchlist) != set(st.session_state.watchlist):
+        st.session_state.watchlist = new_watchlist
+        st.rerun()
