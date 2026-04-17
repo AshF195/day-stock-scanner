@@ -10,7 +10,7 @@ import time
 # 🛠️ YOUR CUSTOM GITHUB LISTS GO HERE 🛠️
 # ==========================================
 CUSTOM_LISTS = {
-    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/ftse_smallcap.txt",
+    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/AshF195/day-stock-scanner/refs/heads/main/ftse_smallcap.txt",
 }
 # ==========================================
 
