@@ -370,17 +370,20 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             score += 4
 
         # =========================
-        # 9. CHASE PENALTY
+        # 9. ENTRY QUALITY (FIX)
         # =========================
+
+        # CRESTING = bad entry
+        if vwap_dist > 4 or current_rsi > 75:
+            score -= 6
+
+        # PEAK = very bad entry
+        if vwap_dist > 6 and current_rsi > 75:
+            score -= 10
+
+        # EXTREME CHASE
         if day_change > 20:
             score -= 5
-
-        if vwap_dist > 6:
-            score -= 3
-
-        # Overextension penalty
-        if vwap_dist > 8 and current_rsi > 75:
-            score -= 6
 
         # =========================
         # 10. CLEAN TREND BOOST (NEW)
