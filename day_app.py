@@ -1,687 +1,230 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import concurrent.futures
 import requests
+import io
 import time
 
 # ==========================================
-# 🛠️ YOUR CUSTOM GITHUB LISTS GO HERE 🛠️
+# PAGE CONFIGURATION
 # ==========================================
-CUSTOM_LISTS = {
-    "FTSE SmallCap (GitHub)": "https://raw.githubusercontent.com/AshF195/day-stock-scanner/refs/heads/main/ftse_smallcap.txt",
-}
+st.set_page_config(page_title="Live Momentum Radar", page_icon="📈", layout="wide")
+
 # ==========================================
-
-# --- MOBILE-FRIENDLY LAYOUT ---
-st.set_page_config(page_title="Day Trade Scanner", layout="centered", initial_sidebar_state="collapsed")
-
-# --- SESSION STATE INITIALIZATION ---
-if "watchlist" not in st.session_state or isinstance(st.session_state.watchlist, list):
-    st.session_state.watchlist = {} 
-if "scan_results" not in st.session_state:
-    st.session_state.scan_results = pd.DataFrame()
-
-st.title("⚡ Day Trade Momentum Scanner")
-
-with st.expander("📖 Scanner Cheat Sheet & Status Explanations"):
-    st.markdown("""
-    **The Grading Tiers:**
-    * **🔥 S-Tier:** The absolute best setups. High volume, huge gaps, massive volatility.
-    * **⭐ A-Tier:** Great setups with strong momentum.
-    * **👍 B-Tier:** Acceptable setups, but might lack extreme volume or volatility.
-    
-    **Status Indicators (The VWAP Rubber Band):**
-    * 🟢 **Run:** Active momentum, volume is supporting the price.
-    * ⚠️ **Cresting:** Overbought, price is outpacing volume. Getting stretched from the VWAP.
-    * 🚨 **PEAK:** Extremely overbought and dangerous. High probability of a sudden dump.
-    * 📉 **Under VWAP:** Stock is losing the intraday battle to sellers. Momentum dying.
-
-    **Dynamic Scoring Metrics:**
-    * **RVOL:** 1 point per 0.5x increase in Relative Volume.
-    * **Gap %:** 1 point per 1% of gap (up or down).
-    * **ADR:** 1 point per 1% of Average Daily Range (starting at 1%).
-    * **Float Size:** +1 point for under 60M shares, scaling up +1 for every 5M lower.
-    * **Short %:** +1 point for over 5% short interest, scaling up +1 for every 5% higher.
-    """)
-
-# --- WEB SESSION SETUP ---
-@st.cache_resource
-def get_session():
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
-    })
-    session.cookies.set('CONSENT', 'YES+cb', domain='.yahoo.com')
-    return session
-
-yf_session = get_session()
-
-# --- 1A. LIVE GAINERS SCRAPER ---
-def get_live_gainers(market):
-    live_urls = {
-        "US Day Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/day_gainers",
-        "US Pre-Market Gainers (Yahoo Live)": "https://finance.yahoo.com/screener/predefined/premarket_gainers",
-        "UK Day Gainers (Yahoo Live)": "https://uk.finance.yahoo.com/screener/predefined/day_gainers"
-    }
-    try:
-        import io
-        resp = yf_session.get(live_urls[market], timeout=10)
-        tables = pd.read_html(io.StringIO(resp.text))
-        
-        if tables:
-            df = tables[0]
-            df = df.dropna(subset=['Symbol'])
-            raw_tickers = df['Symbol'].astype(str).tolist()
-            clean_tickers = [t.split()[-1].upper() for t in raw_tickers if t.strip()]
-            names = df['Name'].astype(str).tolist() if 'Name' in df.columns else [""] * len(clean_tickers)
-            return list(zip(clean_tickers, names))
-    except ValueError:
-        st.error("⚠️ Yahoo blocked the scraper (No tables found). Wait 1 minute and try again.")
-    except Exception as e:
-        st.error(f"⚠️ Live Scraper Error: {e}")
-    return []
-
-# --- 1B. STATIC INDEX SCRAPER ---
-@st.cache_data(ttl=86400) 
-def get_static_tickers(market):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    urls = {
-        "Nasdaq 100 (US)": "https://en.wikipedia.org/wiki/Nasdaq-100",
-        "S&P 500 (US)": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        "FTSE 100 (UK)": "https://en.wikipedia.org/wiki/FTSE_100_Index",
-        "FTSE 250 (UK)": "https://en.wikipedia.org/wiki/FTSE_250_Index"
-    }
-    try:
-        tables = pd.read_html(urls[market], storage_options=headers)
-        for df in tables:
-            cols = list(df.columns)
-            ticker_col = next((c for c in cols if c in ['Ticker', 'Symbol', 'Ticker symbol']), None)
-            name_col = next((c for c in cols if c in ['Company', 'Security', 'Company Name']), None)
-            
-            if ticker_col and name_col:
-                raw_tickers = df[ticker_col].astype(str).tolist()
-                names = df[name_col].astype(str).tolist()
-                
-                clean_tickers = []
-                for t in raw_tickers:
-                    t = t.replace(".", "-") 
-                    if "FTSE" in market:
-                        t = t + ".L"
-                    clean_tickers.append(t)
-                return list(zip(clean_tickers, names))
-    except Exception:
-        pass
-    return []
-
-# --- 1C. IPO CALENDAR SCRAPER ---
-@st.cache_data(ttl=3600) # Caches the list for 1 hour
+# 1. IPO CALENDAR (Cached to save resources)
+# ==========================================
+@st.cache_data(ttl=3600)
 def get_ipo_calendar():
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'
     }
+    df = pd.DataFrame()
     
-    df = pd.DataFrame() # Guarantees we always return a DataFrame, even if empty
-    
-    # SOURCE 1: Try StockAnalysis (Highly reliable, clean table)
+    # SOURCE 1: StockAnalysis
     try:
         url = "https://stockanalysis.com/ipos/calendar/"
         resp = requests.get(url, headers=headers, timeout=10)
-        import io
         tables = pd.read_html(io.StringIO(resp.text))
         if tables:
-            df = tables[0]
-            df = df.fillna("TBD")
+            df = tables[0].fillna("TBD")
     except Exception:
         pass 
 
-    # SOURCE 2: Backup - Yahoo Finance
+    # SOURCE 2: Backup - Yahoo
     if df.empty:
         try:
             url = "https://finance.yahoo.com/calendar/ipo"
-            resp = yf_session.get(url, timeout=10)
-            import io
+            resp = requests.get(url, headers=headers, timeout=10)
             tables = pd.read_html(io.StringIO(resp.text))
             if tables:
-                df = tables[0]
-                df = df.fillna("TBD")
+                df = tables[0].fillna("TBD")
                 useful_cols = [col for col in ['Symbol', 'Company', 'Exchange', 'Date', 'Price Range', 'Shares'] if col in df.columns]
-                if useful_cols:
-                    df = df[useful_cols]
+                if useful_cols: df = df[useful_cols]
         except Exception:
             pass
 
-    # ADD VOLATILITY ESTIMATOR LOGIC
+    # VOLATILITY ESTIMATOR LOGIC
     if not df.empty:
-        # Find whichever column actually contains the word "Share"
         shares_col = next((col for col in df.columns if 'share' in col.lower()), None)
-        
         if shares_col:
             potentials = []
             for val in df[shares_col]:
                 val_str = str(val).replace(',', '').replace('$', '').strip().upper()
                 try:
-                    if 'M' in val_str:
-                        shares = float(val_str.replace('M', '').strip()) * 1000000
-                    elif val_str in ['-', 'TBD', 'NAN', 'N/A']:
-                        shares = -1
-                    else:
-                        shares = float(val_str)
+                    if 'M' in val_str: shares = float(val_str.replace('M', '').strip()) * 1000000
+                    elif val_str in ['-', 'TBD', 'NAN', 'N/A']: shares = -1
+                    else: shares = float(val_str)
                         
-                    # The Golden Day Trading Thresholds
-                    if shares == -1:
-                        potentials.append("❓ Unknown")
-                    elif shares <= 5000000:
-                        potentials.append("🔥 Extreme (Low Float)")
-                    elif shares <= 15000000:
-                        potentials.append("⭐ High")
-                    else:
-                        potentials.append("📊 Standard (Heavy)")
+                    if shares == -1: potentials.append("❓ Unknown")
+                    elif shares <= 5000000: potentials.append("🔥 Extreme (Low Float)")
+                    elif shares <= 15000000: potentials.append("⭐ High")
+                    else: potentials.append("📊 Standard (Heavy)")
                 except ValueError:
                     potentials.append("❓ Unknown")
-                    
-            # Insert the rating at the very front of the table
+            
             if 'Vol Potential' not in df.columns:
                 df.insert(0, 'Vol Potential', potentials)
                 
-    return df # <--- This is the hero line that stops the app from crashing!
+    return df
 
-# --- 2. SCORING LOGIC ---
-def analyze_day_trading_metrics(ticker_info, is_tracking=False):
-    ticker, company_name = ticker_info
-    time.sleep(0.5) 
-    
+# ==========================================
+# 2. THE LIVE MOMENTUM ENGINE (5-Min Charts)
+# ==========================================
+def detect_live_momentum(ticker):
+    """
+    Hunts for immediate, real-time intraday breakouts using 5m candles.
+    """
     try:
-        stock = yf.Ticker(ticker)
-        df_daily = stock.history(period="1mo")
+        # Pull the last 5 days of 5-min data to ensure we have enough volume average data
+        df = yf.download(ticker, period="5d", interval="5m", progress=False)
         
-        if df_daily.empty: raise Exception("Yahoo returned empty data")
-        if len(df_daily) < 15: return None
-            
-        prev_close = df_daily['Close'].iloc[-2]
-        today_open = df_daily['Open'].iloc[-1]
-        today_vol = df_daily['Volume'].iloc[-1]
-        avg_vol = df_daily['Volume'].iloc[-15:-1].mean()
-        
-        if avg_vol < 100000 and not is_tracking:
-            return None 
-        
-        rvol = today_vol / avg_vol if avg_vol > 0 else 0
-        gap_pct = ((today_open - prev_close) / prev_close) * 100
-        
-        df_daily['Daily_Range'] = (df_daily['High'] - df_daily['Low']) / df_daily['Close'].shift(1)
-        adr = df_daily['Daily_Range'].iloc[-15:-1].mean() * 100
-        
-        df_intra = stock.history(period="1d", interval="5m")
-        if df_intra.empty or len(df_intra) < 14:
+        if df.empty or len(df) < 3:
             return None
+            
+        # Get just today's data for HOD calculations
+        today_date = df.index[-1].date()
+        df_today = df[df.index.date == today_date]
         
-        current_price = df_intra['Close'].iloc[-1]
-        day_change = ((current_price - prev_close) / prev_close) * 100
+        if len(df_today) < 2:
+            return None # Market just opened, not enough data today yet
+
+        current_candle = df_today.iloc[-1]
+        prev_candle = df_today.iloc[-2]
         
-        # VWAP
-        df_intra['Typical_Price'] = (df_intra['High'] + df_intra['Low'] + df_intra['Close']) / 3
-        df_intra['VWAP'] = (df_intra['Typical_Price'] * df_intra['Volume']).cumsum() / df_intra['Volume'].cumsum()
-        current_vwap = df_intra['VWAP'].iloc[-1]
-        vwap_dist = ((current_price - current_vwap) / current_vwap) * 100
+        # Flatten MultiIndex columns if yfinance returns them
+        if isinstance(current_candle.name, tuple):
+            pass # Handle based on exact yfinance version, but usually fine
+            
+        close_curr = float(current_candle['Close'].iloc[0] if isinstance(current_candle['Close'], pd.Series) else current_candle['Close'])
+        close_prev = float(prev_candle['Close'].iloc[0] if isinstance(prev_candle['Close'], pd.Series) else prev_candle['Close'])
+        vol_curr = float(current_candle['Volume'].iloc[0] if isinstance(current_candle['Volume'], pd.Series) else current_candle['Volume'])
         
-        # RSI
-        delta = df_intra['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rsi_5m = 100 - (100 / (1 + (gain / loss)))
-        current_rsi = rsi_5m.iloc[-1]
-
-        # High of Day (breakout logic)
-        high_of_day = df_intra['High'].max()
-
-        # Clean values
-        gap_pct = float(np.nan_to_num(gap_pct))
-        rvol = float(np.nan_to_num(rvol))
-        adr = float(np.nan_to_num(adr))
-        vwap_dist = float(np.nan_to_num(vwap_dist))
-        current_rsi = float(np.nan_to_num(current_rsi))
-        day_change = float(np.nan_to_num(day_change))
-
-        # =========================
-        # 🔥 HARD FILTER
-        # =========================
-        if not is_tracking:
-            if rvol < 1.5:
-                return None
-            if day_change < 2 and gap_pct < 2:
-                return None
-            if today_vol < 300000:
-                return None
-
         score = 0
-
-        # =========================
-        # 1. RVOL (PRIMARY DRIVER)
-        # =========================
-        if rvol >= 5:
-            score += 12
-        elif rvol >= 3:
-            score += 9
-        elif rvol >= 2:
-            score += 6
-        elif rvol >= 1.5:
-            score += 3
-
-        # =========================
-        # 2. MOMENTUM
-        # =========================
-        momentum = max(day_change, gap_pct)
-
-        if momentum >= 15:
+        receipt = []
+        
+        # --- 1. PRICE VELOCITY (The Sudden Climb) ---
+        quick_surge_pct = ((close_curr - close_prev) / close_prev) * 100
+        
+        if quick_surge_pct > 2.0:
             score += 10
-        elif momentum >= 10:
-            score += 7
-        elif momentum >= 5:
+            receipt.append(f"🚀 Violent 5m Surge (+{quick_surge_pct:.2f}%)")
+        elif quick_surge_pct > 0.75:
             score += 5
-        elif momentum >= 2:
-            score += 2
-
-        # =========================
-        # 3. VOLUME CONFIRMATION
-        # =========================
-        if today_vol >= 10_000_000:
-            score += 6
-        elif today_vol >= 5_000_000:
+            receipt.append(f"📈 Quick 5m Climb (+{quick_surge_pct:.2f}%)")
+        elif quick_surge_pct < 0:
+            return None # Drop it entirely if the current 5m candle is red! We only want surging stocks.
+            
+        # --- 2. VOLUME VELOCITY (The Gas Pedal) ---
+        avg_5m_vol = df_today['Volume'].mean()
+        if isinstance(avg_5m_vol, pd.Series): avg_5m_vol = float(avg_5m_vol.iloc[0])
+        
+        current_vol_spike = vol_curr / avg_5m_vol if avg_5m_vol > 0 else 0
+        
+        if current_vol_spike > 4.0:
+            score += 8
+            receipt.append(f"💥 Massive Vol Influx ({current_vol_spike:.1f}x normal)")
+        elif current_vol_spike > 2.0:
             score += 4
-        elif today_vol >= 1_000_000:
-            score += 2
+            receipt.append(f"🔥 Heavy Vol Stepping In ({current_vol_spike:.1f}x)")
+            
+        # 🚨 GHOST TOWN PENALTY: Don't alert on zero-volume illiquid stocks
+        if avg_5m_vol < 5000: # If it averages less than 5k shares per 5 mins, skip it
+            return None
 
-        # =========================
-        # 4. FLOAT + SHORT
-        # =========================
-        float_display = "N/A"
-        short_display = "N/A"
-        float_score = 0
-
-        try:
-            info = stock.info or {}
-            float_shares = info.get('floatShares')
-            short_pct = info.get('shortPercentOfFloat')
-
-            if float_shares and float_shares > 0:
-                float_m = float_shares / 1_000_000
-                float_display = f"{float_m:.1f}M"
-
-                if float_m <= 10:
-                    float_score = 10
-                elif float_m <= 20:
-                    float_score = 7
-                elif float_m <= 50:
-                    float_score = 4
-                elif float_m <= 100:
-                    float_score = 1
-                else:
-                    float_score = -5
-
-                score += float_score
-
-            if short_pct and short_pct > 0:
-                short_val = short_pct * 100
-                short_display = f"{short_val:.1f}%"
-
-                if short_val >= 25:
-                    score += 6
-                elif short_val >= 15:
-                    score += 4
-                elif short_val >= 10:
-                    score += 2
-
-        except Exception:
-            pass
-
-        # =========================
-        # 5. VWAP (BALANCED)
-        # =========================
-        if current_price > current_vwap:
-            score += 3
-        else:
-            score -= 3
-
-        # VWAP reclaim bonus
-        if current_price > current_vwap and vwap_dist < 1:
-            score += 2
-
-        # =========================
-        # 6. BREAKOUT DETECTION
-        # =========================
-        if current_price >= high_of_day * 0.995:
-            score += 5  # near / breaking high of day
-
-        # =========================
-        # 7. STACKING EDGE
-        # =========================
-        if rvol > 3 and momentum > 5:
+        # --- 3. HIGH OF DAY (HOD) PROXIMITY ---
+        hod = float(df_today['High'].max().iloc[0] if isinstance(df_today['High'].max(), pd.Series) else df_today['High'].max())
+        dist_to_hod = ((hod - close_curr) / hod) * 100
+        
+        if dist_to_hod <= 1.0:
             score += 5
+            receipt.append(f"🎯 Pushing HOD (Within {dist_to_hod:.1f}%)")
 
-        if rvol > 3 and momentum > 5 and float_score >= 7:
-            score += 5
-
-        # =========================
-        # 8. EARLY TREND BONUS
-        # =========================
-        if 2 <= day_change <= 10 and current_price > current_vwap:
-            score += 4
-
-        # =========================
-        # 9. ENTRY QUALITY (FIX)
-        # =========================
-
-        # CRESTING = bad entry
-        if vwap_dist > 4 or current_rsi > 75:
-            score -= 6
-
-        # PEAK = very bad entry
-        if vwap_dist > 6 and current_rsi > 75:
-            score -= 10
-
-        # EXTREME CHASE
-        if day_change > 20:
-            score -= 5
-
-        # =========================
-        # 10. CLEAN TREND BOOST (NEW)
-        # =========================
-        if (
-            current_price > current_vwap and
-            vwap_dist < 3 and
-            3 <= day_change <= 12
-         ):
-            score += 5
-
-        # =========================
-        # FINAL TIERS
-        # =========================
-        if score >= 25:
-            tier = "🔥 S-Tier"
-        elif score >= 18:
-            tier = "⭐ A-Tier"
-        elif score >= 10:
-            tier = "👍 B-Tier"
-        else:
-            tier = "C-Tier"
-
-        # =========================
-        # STATUS
-        # =========================
-        crest_status = "🟢 Run"
-        if vwap_dist > 6.0 and current_rsi > 75:
-            crest_status = "🚨 PEAK"
-        elif vwap_dist > 4.0 or current_rsi > 75:
-            crest_status = "⚠️ Cresting"
-        elif current_price < current_vwap:
-            crest_status = "📉 Under VWAP"
+        # TIERING
+        if score >= 15: tier = "🔥 S-Tier (Exploding)"
+        elif score >= 9: tier = "⭐ A-Tier (Surging)"
+        elif score >= 5: tier = "👍 B-Tier (Waking Up)"
+        else: return None # If it's below 5 points, we don't care. Keep the screen clean.
 
         return {
             "Ticker": ticker,
-            "Company": company_name,
             "Tier": tier,
             "Score": score,
-            "Status": crest_status,
-            "Price": round(current_price, 2),
-            "Chg %": round(day_change, 2),
-            "Gap %": round(gap_pct, 2),
-            "RVOL": round(rvol, 2),
-            "VWAP Dist %": round(vwap_dist, 2),
-            "Float": float_display,
-            "Short %": short_display
+            "Price": f"${close_curr:.2f}",
+            "5m Surge %": f"+{quick_surge_pct:.2f}%",
+            "Vol Spike": f"{current_vol_spike:.1f}x",
+            "Alerts": " | ".join(receipt)
         }
 
     except Exception as e:
-        raise Exception(f"API Error - {str(e)}")
+        return None
 
-# --- UI STYLING FUNCTIONS ---
-def color_status(val):
-    val_str = str(val)
-    if "PEAK" in val_str: return 'color: #FF3333; font-weight: bold'  
-    if "Cresting" in val_str: return 'color: #FFaa00; font-weight: bold'  
-    if "Run" in val_str: return 'color: #33CC33; font-weight: bold'  
-    if "Under VWAP" in val_str: return 'color: #CC0000'                     
-    return ''
+# ==========================================
+# 3. UI & APP LAYOUT
+# ==========================================
+st.title("🦅 Intraday Momentum Radar")
+st.markdown("Hunts for **live 5-minute surges**, unusual volume influxes, and High-of-Day breakouts.")
 
-def color_metrics(val, column):
-    try:
-        if isinstance(val, str):
-            if val == "N/A" or val == "TBD": return ""
-            num = float(val.replace('M', '').replace('%', '').replace('x', ''))
+tab1, tab2 = st.tabs(["🚀 Live Radar", "📅 IPO Calendar"])
+
+with tab1:
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Radar Settings")
+        market_choice = st.selectbox("Select Market", ["US Tech / Meme Stocks (Pre-loaded)", "UK Market (LSE Pre-loaded)", "Custom Watchlist"])
+        
+        # Load a default pool of traditionally highly volatile day-trading stocks
+        default_us = "TSLA, NVDA, AMD, MARA, PLTR, SOFI, COIN, RIOT, AMC, GME, SMCI, ALV, SMR, CVNA, MSTR"
+        default_uk = "RR.L, LLOY.L, BARC.L, BP.L, SHEL.L, VOD.L, TSCO.L, EZJ.L, IAG.L"
+        
+        if market_choice == "Custom Watchlist":
+            ticker_input = st.text_area("Paste Tickers (Comma separated):", "AAPL, MSFT")
+        elif market_choice == "UK Market (LSE Pre-loaded)":
+            ticker_input = st.text_area("Scanning these UK Tickers:", default_uk)
         else:
-            num = float(val)
-    except ValueError:
-        return ""
-    
-    if column == "Score":
-        if num >= 10: return 'color: #33CC33; font-weight: bold'
-        if num < 5: return 'color: #FF3333'
-    elif column in ["Chg %", "Gap %"]:
-        if num >= 5: return 'color: #33CC33; font-weight: bold'
-        if num < 0: return 'color: #FF3333'
-    elif column == "RVOL":
-        if num >= 2.0: return 'color: #33CC33; font-weight: bold'
-        if num < 1.0: return 'color: #FF3333'
-    elif column == "VWAP Dist %":
-        if num > 6.0 or num < 0: return 'color: #FF3333' 
-        if 0 <= num <= 4.0: return 'color: #33CC33' 
-    elif column == "Float":
-        if num < 20: return 'color: #33CC33; font-weight: bold' 
-        if num > 100: return 'color: #FF3333' 
-    elif column == "Short %":
-        if num > 10: return 'color: #33CC33; font-weight: bold' 
-    
-    return ""
-
-def apply_styling(df):
-    return df.style.map(color_status, subset=["Status"]) \
-                   .map(lambda x: color_metrics(x, "Score"), subset=["Score"]) \
-                   .map(lambda x: color_metrics(x, "Chg %"), subset=["Chg %"]) \
-                   .map(lambda x: color_metrics(x, "Gap %"), subset=["Gap %"]) \
-                   .map(lambda x: color_metrics(x, "RVOL"), subset=["RVOL"]) \
-                   .map(lambda x: color_metrics(x, "VWAP Dist %"), subset=["VWAP Dist %"]) \
-                   .map(lambda x: color_metrics(x, "Float"), subset=["Float"]) \
-                   .map(lambda x: color_metrics(x, "Short %"), subset=["Short %"])
-
-# --- TAB LAYOUT ---
-# Added the 3rd tab here!
-tab_scan, tab_watch, tab_ipo = st.tabs(["🚀 Live Scanner", "🎯 My Watchlist", "📅 IPO Notice Board"])
-
-# ==========================================
-# TAB 1: MARKET SCANNER
-# ==========================================
-with tab_scan:
-    market_choices = [
-        "UK Day Gainers (Yahoo Live)", "US Day Gainers (Yahoo Live)", "US Pre-Market Gainers (Yahoo Live)",
-        "Nasdaq 100 (US)", "S&P 500 (US)", "FTSE 100 (UK)", "FTSE 250 (UK)", "Manual", "Upload Custom List (.txt)"
-    ] + list(CUSTOM_LISTS.keys())
-    
-    market_choice = st.selectbox("🌍 Select Market to Scan:", market_choices)
-
-    manual_tickers = ""
-    uploaded_file = None
-    
-    if market_choice == "Manual":
-        manual_tickers = st.text_input("Enter tickers (comma separated):", "TSLA, NVDA, AAPL")
-    elif market_choice == "Upload Custom List (.txt)":
-        uploaded_file = st.file_uploader("Upload your list (Format: TICKER, Company Name)", type=["txt"])
-
-    if st.button("🚀 Scan Market", use_container_width=True):
-        ticker_list = []
+            ticker_input = st.text_area("Scanning these US Tickers:", default_us)
+            
+        run_scan = st.button("🚀 RUN LIVE RADAR NOW", use_container_width=True)
         
-        if market_choice == "Manual":
-            ticker_list = [(t.strip().upper(), "Manual") for t in manual_tickers.split(",") if t.strip()]
-        
-        elif market_choice == "Upload Custom List (.txt)":
-            if uploaded_file is not None:
-                content = uploaded_file.read().decode("utf-8").splitlines()
-                for line in content:
-                    line = line.strip()
-                    if line:
-                        if "," in line:
-                            parts = line.split(",", 1)
-                            ticker_list.append((parts[0].strip().upper(), parts[1].strip()))
-                        else:
-                            ticker_list.append((line.upper(), "Custom Upload"))
+        st.info("**Pro-Tip:** Wall Street algos run on 5-minute candles. Hit this button every 5-10 minutes to see what is *just* starting to squeeze.")
+
+    with col2:
+        if run_scan:
+            tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+            
+            if not tickers:
+                st.warning("Please enter some tickers to scan.")
             else:
-                st.warning("⚠️ Please upload a .txt file before scanning.")
+                progress_text = "Scanning 5-minute charts..."
+                my_bar = st.progress(0, text=progress_text)
                 
-        elif market_choice in CUSTOM_LISTS:
-            try:
-                st.info(f"Downloading {market_choice} from GitHub...")
-                resp = requests.get(CUSTOM_LISTS[market_choice], timeout=10)
-                resp.raise_for_status() 
-                
-                content = resp.text.splitlines()
-                for line in content:
-                    line = line.strip()
-                    if line:
-                        if "," in line:
-                            parts = line.split(",", 1)
-                            ticker_list.append((parts[0].strip().upper(), parts[1].strip()))
-                        else:
-                            ticker_list.append((line.upper(), "GitHub Upload"))
-            except Exception as e:
-                st.error(f"⚠️ Failed to fetch list from GitHub: {e}")
-                
-        elif "Yahoo Live" in market_choice:
-            ticker_list = get_live_gainers(market_choice) 
-            
-        else:
-            ticker_list = get_static_tickers(market_choice)
-            
-        if ticker_list:
-            st.info(f"Scanning {len(ticker_list)} stocks...")
-            progress_bar = st.progress(0)
-            results = []
-            errors = []
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(analyze_day_trading_metrics, t_info): t_info for t_info in ticker_list}
-                for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                    progress_bar.progress((i + 1) / len(ticker_list))
-                    try:
-                        res = future.result()
-                        if res: results.append(res)
-                    except Exception as e:
-                        errors.append(f"{futures[future][0]}: {str(e)}") 
+                results = []
+                for i, ticker in enumerate(tickers):
+                    # Update progress bar
+                    percent_complete = int(((i + 1) / len(tickers)) * 100)
+                    my_bar.progress(percent_complete, text=f"Analyzing {ticker} ({percent_complete}%)")
+                    
+                    data = detect_live_momentum(ticker)
+                    if data:
+                        results.append(data)
                         
-            if errors and len(errors) > 5:
-                st.error(f"⚠️ Caught {len(errors)} API timeouts. Yahoo may be rate-limiting.")
-                with st.expander("View Error Logs"):
-                    st.write(errors)
-
-            if results:
-                st.session_state.scan_results = pd.DataFrame(results).sort_values(by="Score", ascending=False)
-            else:
-                st.warning("No stocks met the criteria right now.")
-                st.session_state.scan_results = pd.DataFrame()
-        elif market_choice not in ["Upload Custom List (.txt)"] and market_choice not in CUSTOM_LISTS.keys():
-            st.warning("⚠️ Scraper returned zero stocks. The market might be closed, or the index list is temporarily down.")
-
-    if not st.session_state.scan_results.empty:
-        st.subheader("🏆 Scanner Results")
-        st.caption("Tick the box on the left to pin a stock to your Universal Watchlist.")
-        
-        df_display = st.session_state.scan_results.copy()
-        
-        if 'Track' not in df_display.columns:
-            df_display.insert(0, "Track", df_display["Ticker"].isin(st.session_state.watchlist.keys()))
-        else:
-            df_display["Track"] = df_display["Ticker"].isin(st.session_state.watchlist.keys())
-        
-        edited_df = st.data_editor(
-            apply_styling(df_display),
-            hide_index=True,
-            use_container_width=True,
-            disabled=[col for col in df_display.columns if col not in ["Track"]], 
-            column_config={
-                "Track": st.column_config.CheckboxColumn("📌 Track"),
-                "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought.\n🚨 PEAK: Dump imminent.\n📉 Under VWAP: Momentum dying."),
-                "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-                "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
-                "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
-                "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%")
-            }
-        )
-        
-        changes_made = False
-        currently_tracked = edited_df[edited_df["Track"] == True]
-        currently_untracked = edited_df[edited_df["Track"] == False]
-
-        for _, row in currently_tracked.iterrows():
-            if row["Ticker"] not in st.session_state.watchlist:
-                st.session_state.watchlist[row["Ticker"]] = row["Company"]
-                changes_made = True
+                my_bar.empty() # Clear progress bar when done
                 
-        for _, row in currently_untracked.iterrows():
-            if row["Ticker"] in st.session_state.watchlist:
-                del st.session_state.watchlist[row["Ticker"]]
-                changes_made = True
-                
-        if changes_made:
-            st.rerun() 
+                if results:
+                    # Convert to dataframe and sort by Score descending
+                    res_df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+                    st.success(f"Found {len(res_df)} stocks actively surging right now!")
+                    st.dataframe(res_df, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No immediate 5-minute momentum found. The market might be choppy or resting. Try again in 5 minutes!")
 
-# ==========================================
-# TAB 2: MY WATCHLIST
-# ==========================================
-with tab_watch:
-    if not st.session_state.watchlist:
-        st.info("Your Watchlist is empty. Scan the market and tick the 'Track' box to pin setups here!")
-    else:
-        st.success(f"🎯 **Active Watchlist** ({len(st.session_state.watchlist)} stocks tracking)")
-        
-        if st.button("🔄 Refresh Watchlist Prices", type="primary"):
-            with st.spinner("Fetching live data for tracked stocks..."):
-                tracked_results = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = {executor.submit(analyze_day_trading_metrics, (ticker, company), True): ticker for ticker, company in st.session_state.watchlist.items()}
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            res = future.result()
-                            if res: tracked_results.append(res)
-                        except Exception:
-                            pass
-                
-                if tracked_results:
-                    df_tracked = pd.DataFrame(tracked_results).sort_values(by="Score", ascending=False)
-                    
-                    sell_warnings = df_tracked[df_tracked['Status'].isin(["🚨 PEAK", "⚠️ Cresting"])]['Ticker'].tolist()
-                    if sell_warnings:
-                        st.error(f"**⚠️ SELL WARNING:** Momentum is overextended on: **{', '.join(sell_warnings)}**. Consider taking profits!")
-                    
-                    st.dataframe(
-                        apply_styling(df_tracked),
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Status": st.column_config.TextColumn("Status", help="🟢 Run: Active momentum.\n⚠️ Cresting: Overbought.\n🚨 PEAK: Dump imminent.\n📉 Under VWAP: Momentum dying."),
-                            "Price": st.column_config.NumberColumn("Price", format="%.2f"),
-                            "Chg %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-                            "Gap %": st.column_config.NumberColumn("Gap %", format="%.2f%%"),
-                            "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx"),
-                            "VWAP Dist %": st.column_config.NumberColumn("VWAP Dist %", format="%.2f%%")
-                        }
-                    )
-
-# ==========================================
-# TAB 3: IPO NOTICE BOARD
-# ==========================================
-with tab_ipo:
-    st.subheader("📅 Upcoming IPOs (Initial Public Offerings)")
-    st.markdown("Track brand new companies about to go live on the markets. Keep an eye on these for massive Day 1 volatility!")
+with tab2:
+    st.subheader("Upcoming IPO Calendar")
+    st.markdown("Identifies potential low-float runners before they hit the market.")
     
-    with st.spinner("Fetching this week's IPO calendar..."):
-        df_ipo = get_ipo_calendar()
-        
-        if not df_ipo.empty:
-            st.dataframe(
-                df_ipo,
-                hide_index=True,
-                use_container_width=True
-            )
+    with st.spinner("Fetching IPO data..."):
+        ipo_df = get_ipo_calendar()
+        if not ipo_df.empty:
+            st.dataframe(ipo_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No upcoming IPOs found for this timeframe, or the calendar is temporarily unavailable.")
+            st.error("Could not retrieve IPO calendar data at this time.")
