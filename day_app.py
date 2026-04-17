@@ -341,6 +341,15 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             score -= 6
 
         # =========================
+        # 8. CHASE PENALTY (NEW)
+        # =========================
+        if day_change > 20:
+            score -= 5
+
+        if vwap_dist > 6:
+            score -= 3
+
+        # =========================
         # FINAL TIERS
         # =========================
         if score >= 25:
