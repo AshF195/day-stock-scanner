@@ -242,7 +242,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         
         # Only award points if the stock is actually GREEN
         if gap_pct > 0: 
-        score += int(gap_pct)
+            score += int(gap_pct)
         if rvol > 0: score += int(rvol / 0.5)
         if adr >= 1.0: score += int(adr)
         
