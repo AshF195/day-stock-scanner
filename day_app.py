@@ -188,7 +188,7 @@ def get_ipo_calendar():
     return df # <--- This is the hero line that stops the app from crashing!
 
 # --- 2. SCORING LOGIC ---
-ddef analyze_day_trading_metrics(ticker_info, is_tracking=False):
+def analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
     time.sleep(0.5) 
     
