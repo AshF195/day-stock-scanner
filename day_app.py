@@ -204,7 +204,8 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         today_vol = df_daily['Volume'].iloc[-1]
         avg_vol = df_daily['Volume'].iloc[-15:-1].mean()
         
-        if avg_vol < 100000 and not is_tracking: return None 
+        if avg_vol < 100000 and not is_tracking:
+            return None 
         
         rvol = today_vol / avg_vol if avg_vol > 0 else 0
         gap_pct = ((today_open - prev_close) / prev_close) * 100
@@ -213,21 +214,27 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         adr = df_daily['Daily_Range'].iloc[-15:-1].mean() * 100
         
         df_intra = stock.history(period="1d", interval="5m")
-        if df_intra.empty or len(df_intra) < 14: return None
+        if df_intra.empty or len(df_intra) < 14:
+            return None
         
         current_price = df_intra['Close'].iloc[-1]
         day_change = ((current_price - prev_close) / prev_close) * 100
         
+        # VWAP
         df_intra['Typical_Price'] = (df_intra['High'] + df_intra['Low'] + df_intra['Close']) / 3
         df_intra['VWAP'] = (df_intra['Typical_Price'] * df_intra['Volume']).cumsum() / df_intra['Volume'].cumsum()
         current_vwap = df_intra['VWAP'].iloc[-1]
         vwap_dist = ((current_price - current_vwap) / current_vwap) * 100
         
+        # RSI
         delta = df_intra['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
+
+        # High of Day (breakout logic)
+        high_of_day = df_intra['High'].max()
 
         # Clean values
         gap_pct = float(np.nan_to_num(gap_pct))
@@ -238,10 +245,8 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         day_change = float(np.nan_to_num(day_change))
 
         # =========================
-        # 🔥 PRO SCORING SYSTEM
+        # 🔥 HARD FILTER
         # =========================
-
-        # --- HARD FILTER ---
         if not is_tracking:
             if rvol < 1.5:
                 return None
@@ -252,7 +257,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
 
         score = 0
 
-        # 1. RVOL (PRIMARY)
+        # =========================
+        # 1. RVOL (PRIMARY DRIVER)
+        # =========================
         if rvol >= 5:
             score += 12
         elif rvol >= 3:
@@ -262,7 +269,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         elif rvol >= 1.5:
             score += 3
 
+        # =========================
         # 2. MOMENTUM
+        # =========================
         momentum = max(day_change, gap_pct)
 
         if momentum >= 15:
@@ -274,7 +283,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         elif momentum >= 2:
             score += 2
 
-        # 3. VOLUME
+        # =========================
+        # 3. VOLUME CONFIRMATION
+        # =========================
         if today_vol >= 10_000_000:
             score += 6
         elif today_vol >= 5_000_000:
@@ -282,7 +293,9 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         elif today_vol >= 1_000_000:
             score += 2
 
-        # 4. FLOAT
+        # =========================
+        # 4. FLOAT + SHORT
+        # =========================
         float_display = "N/A"
         short_display = "N/A"
         float_score = 0
@@ -292,7 +305,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             float_shares = info.get('floatShares')
             short_pct = info.get('shortPercentOfFloat')
 
-            if float_shares and not pd.isna(float_shares) and float_shares > 0:
+            if float_shares and float_shares > 0:
                 float_m = float_shares / 1_000_000
                 float_display = f"{float_m:.1f}M"
 
@@ -309,7 +322,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
 
                 score += float_score
 
-            if short_pct and not pd.isna(short_pct) and short_pct > 0:
+            if short_pct and short_pct > 0:
                 short_val = short_pct * 100
                 short_display = f"{short_val:.1f}%"
 
@@ -323,31 +336,51 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         except Exception:
             pass
 
-        # 5. VWAP POSITION
+        # =========================
+        # 5. VWAP (BALANCED)
+        # =========================
         if current_price > current_vwap:
             score += 3
         else:
-            score -= 5
+            score -= 3
 
-        # 6. STACKING BONUS
+        # VWAP reclaim bonus
+        if current_price > current_vwap and vwap_dist < 1:
+            score += 2
+
+        # =========================
+        # 6. BREAKOUT DETECTION
+        # =========================
+        if current_price >= high_of_day * 0.995:
+            score += 5  # near / breaking high of day
+
+        # =========================
+        # 7. STACKING EDGE
+        # =========================
         if rvol > 3 and momentum > 5:
             score += 5
 
         if rvol > 3 and momentum > 5 and float_score >= 7:
             score += 5
 
-        # 7. OVEREXTENSION PENALTY
-        if vwap_dist > 8 and current_rsi > 75:
-            score -= 6
+        # =========================
+        # 8. EARLY TREND BONUS
+        # =========================
+        if 2 <= day_change <= 10 and current_price > current_vwap:
+            score += 4
 
         # =========================
-        # 8. CHASE PENALTY (NEW)
+        # 9. CHASE PENALTY
         # =========================
         if day_change > 20:
             score -= 5
 
         if vwap_dist > 6:
             score -= 3
+
+        # Overextension penalty
+        if vwap_dist > 8 and current_rsi > 75:
+            score -= 6
 
         # =========================
         # FINAL TIERS
@@ -362,7 +395,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             tier = "C-Tier"
 
         # =========================
-        # STATUS LOGIC (UNCHANGED)
+        # STATUS
         # =========================
         crest_status = "🟢 Run"
         if vwap_dist > 6.0 and current_rsi > 75:
@@ -374,7 +407,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
 
         return {
             "Ticker": ticker,
-            "Company": company_name, 
+            "Company": company_name,
             "Tier": tier,
             "Score": score,
             "Status": crest_status,
