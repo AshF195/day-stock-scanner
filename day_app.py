@@ -188,7 +188,7 @@ def get_ipo_calendar():
     return df # <--- This is the hero line that stops the app from crashing!
 
 # --- 2. SCORING LOGIC ---
-def analyze_day_trading_metrics(ticker_info, is_tracking=False):
+ddef analyze_day_trading_metrics(ticker_info, is_tracking=False):
     ticker, company_name = ticker_info
     time.sleep(0.5) 
     
@@ -212,8 +212,6 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         df_daily['Daily_Range'] = (df_daily['High'] - df_daily['Low']) / df_daily['Close'].shift(1)
         adr = df_daily['Daily_Range'].iloc[-15:-1].mean() * 100
         
-        if rvol < 1.0 and abs(gap_pct) < 1.0 and adr < 1.5 and not is_tracking: return None
-
         df_intra = stock.history(period="1d", interval="5m")
         if df_intra.empty or len(df_intra) < 14: return None
         
@@ -231,6 +229,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         rsi_5m = 100 - (100 / (1 + (gain / loss)))
         current_rsi = rsi_5m.iloc[-1]
 
+        # Clean values
         gap_pct = float(np.nan_to_num(gap_pct))
         rvol = float(np.nan_to_num(rvol))
         adr = float(np.nan_to_num(adr))
@@ -238,43 +237,131 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
         current_rsi = float(np.nan_to_num(current_rsi))
         day_change = float(np.nan_to_num(day_change))
 
-        score = 0
-        
-        # Only award points if the stock is actually GREEN
-        if gap_pct > 0: 
-            score += int(gap_pct)
-        if rvol > 0: score += int(rvol / 0.5)
-        if adr >= 1.0: score += int(adr)
-        
-        if score < 3 and not is_tracking: return None
+        # =========================
+        # 🔥 PRO SCORING SYSTEM
+        # =========================
 
+        # --- HARD FILTER ---
+        if not is_tracking:
+            if rvol < 1.5:
+                return None
+            if day_change < 2 and gap_pct < 2:
+                return None
+            if today_vol < 300000:
+                return None
+
+        score = 0
+
+        # 1. RVOL (PRIMARY)
+        if rvol >= 5:
+            score += 12
+        elif rvol >= 3:
+            score += 9
+        elif rvol >= 2:
+            score += 6
+        elif rvol >= 1.5:
+            score += 3
+
+        # 2. MOMENTUM
+        momentum = max(day_change, gap_pct)
+
+        if momentum >= 15:
+            score += 10
+        elif momentum >= 10:
+            score += 7
+        elif momentum >= 5:
+            score += 5
+        elif momentum >= 2:
+            score += 2
+
+        # 3. VOLUME
+        if today_vol >= 10_000_000:
+            score += 6
+        elif today_vol >= 5_000_000:
+            score += 4
+        elif today_vol >= 1_000_000:
+            score += 2
+
+        # 4. FLOAT
         float_display = "N/A"
         short_display = "N/A"
+        float_score = 0
+
         try:
-            info = stock.info or {} 
+            info = stock.info or {}
             float_shares = info.get('floatShares')
             short_pct = info.get('shortPercentOfFloat')
-            
+
             if float_shares and not pd.isna(float_shares) and float_shares > 0:
-                float_display = f"{float_shares / 1000000:.1f}M"
-                if float_shares < 60000000: score += int((60 - (float_shares / 1000000)) / 5) + 1
-                
+                float_m = float_shares / 1_000_000
+                float_display = f"{float_m:.1f}M"
+
+                if float_m <= 10:
+                    float_score = 10
+                elif float_m <= 20:
+                    float_score = 7
+                elif float_m <= 50:
+                    float_score = 4
+                elif float_m <= 100:
+                    float_score = 1
+                else:
+                    float_score = -5
+
+                score += float_score
+
             if short_pct and not pd.isna(short_pct) and short_pct > 0:
                 short_val = short_pct * 100
                 short_display = f"{short_val:.1f}%"
-                if short_val >= 5.0: score += int(short_val / 5)
+
+                if short_val >= 25:
+                    score += 6
+                elif short_val >= 15:
+                    score += 4
+                elif short_val >= 10:
+                    score += 2
+
         except Exception:
-            pass 
+            pass
 
-        if score >= 15: tier = "🔥 S-Tier"
-        elif score >= 10: tier = "⭐ A-Tier"
-        elif score >= 5: tier = "👍 B-Tier"
-        else: tier = "C-Tier"
+        # 5. VWAP POSITION
+        if current_price > current_vwap:
+            score += 3
+        else:
+            score -= 5
 
+        # 6. STACKING BONUS
+        if rvol > 3 and momentum > 5:
+            score += 5
+
+        if rvol > 3 and momentum > 5 and float_score >= 7:
+            score += 5
+
+        # 7. OVEREXTENSION PENALTY
+        if vwap_dist > 8 and current_rsi > 75:
+            score -= 6
+
+        # =========================
+        # FINAL TIERS
+        # =========================
+        if score >= 25:
+            tier = "🔥 S-Tier"
+        elif score >= 18:
+            tier = "⭐ A-Tier"
+        elif score >= 10:
+            tier = "👍 B-Tier"
+        else:
+            tier = "C-Tier"
+
+        # =========================
+        # STATUS LOGIC (UNCHANGED)
+        # =========================
         crest_status = "🟢 Run"
-        if vwap_dist > 6.0 and current_rsi > 75: crest_status = "🚨 PEAK"
-        elif vwap_dist > 4.0 or current_rsi > 75: crest_status = "⚠️ Cresting"
-        elif current_price < current_vwap: crest_status = "📉 Under VWAP"
+        if vwap_dist > 6.0 and current_rsi > 75:
+            crest_status = "🚨 PEAK"
+        elif vwap_dist > 4.0 or current_rsi > 75:
+            crest_status = "⚠️ Cresting"
+        elif current_price < current_vwap:
+            crest_status = "📉 Under VWAP"
 
         return {
             "Ticker": ticker,
@@ -290,6 +377,7 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             "Float": float_display,
             "Short %": short_display
         }
+
     except Exception as e:
         raise Exception(f"API Error - {str(e)}")
 
