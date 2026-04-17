@@ -383,6 +383,16 @@ def analyze_day_trading_metrics(ticker_info, is_tracking=False):
             score -= 6
 
         # =========================
+        # 10. CLEAN TREND BOOST (NEW)
+        # =========================
+        if (
+            current_price > current_vwap and
+            vwap_dist < 3 and
+            3 <= day_change <= 12
+         ):
+            score += 5
+
+        # =========================
         # FINAL TIERS
         # =========================
         if score >= 25:
